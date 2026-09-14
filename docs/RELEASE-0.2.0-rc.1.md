@@ -27,6 +27,16 @@ on Python 3.10 and 3.13; external SASRec CPU tests require the user's compatible
 research source and are skipped when it is absent. See the final repository CI
 status and README for hardware limitations.
 
+Hardware acceptance passed using the Ubuntu worker ZIP inside WSL2 on an RTX
+5070 Ti with PyTorch 2.7.1 / CUDA 12.8: automated setup, UUID verification, queue
+assignment, container execution and seven archived files with matching SHA256
+hashes and no pending uploads. This used an isolated controller API inside WSL.
+The Windows controller ZIP and Windows-to-WSL launcher were tested separately;
+an existing explicit Windows firewall block prevented the cross-boundary test
+connection and was preserved. Native Ubuntu GPU installation and A6000 hardware
+have not been exercised for this release. Each worker performs its own CUDA check
+before becoming usable.
+
 ## 中文
 
 首个公开预览版，提供分离的 Windows 主控端、Windows 算力端、Ubuntu 算力端三个包。
@@ -39,3 +49,5 @@ status and README for hardware limitations.
 
 下载具体的三个应用 ZIP，不要将 GitHub 自动附带的 Source code 当作安装包。
 包内没有私人节点凭证、科研数据、训练模型或外部算法源码。许可证为 MIT。
+
+实机验收：Ubuntu 算力 ZIP 已在 Windows/WSL2 的 RTX 5070 Ti 上自动完成安装、UUID 验卡、接单、GPU 容器运行和结果回传；7 个归档文件全部通过 SHA256 校验，待上传为 0。此次队列验收使用 WSL 内独立主控 API。Windows 主控 ZIP 和 Windows→WSL 启动入口另行完成验证；Windows 现有的明确防火墙阻止规则使跨边界测试连接受阻，该规则被保留。原生 Ubuntu GPU 部署和 A6000 尚未对本版进行实机验收，安装时会逐台实际验卡。
