@@ -141,6 +141,7 @@ finish uploading.
 |---|---|
 | No WSL distribution | Install WSL2 Ubuntu, open it once and create a normal user. Restart Windows if installation requests it. |
 | `docker: command not found` in WSL | Start Docker Desktop and enable integration for the distribution selected by the launcher. |
+| Docker Desktop fails on `sailor-ingest.sock` or `engine.sock` before its engine starts | This is a Docker Desktop startup failure. Similar Windows reports describe inaccessible socket files and a workaround involving runtime-directory backups and disabling the optional Docker AI feature. See [Docker issue 536](https://github.com/docker/desktop-feedback/issues/536). Preserve Docker data; the worker installer does not reset Docker or remove its disks. |
 | Docker permission denied on native Ubuntu | Configure your ordinary user's Docker access; sign out/in if group membership changed. Do not start the worker as root. |
 | Cannot pair with controller | Open the exact controller URL from that worker. Check that the controller is running, its IP/port are correct, and firewall/VPN routes allow it. Use controller 0.2 or newer. |
 | Image download fails or times out | Check that Docker can reach the image registry. Fix Docker's proxy/network configuration and rerun the launcher; do not weaken digest checks. |

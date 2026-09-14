@@ -109,6 +109,7 @@ datasets/
 |---|---|
 | 找不到 WSL 发行版 | 安装 WSL2 Ubuntu，首次打开并创建普通用户；安装要求重启 Windows 时先重启。 |
 | WSL 中 `docker: command not found` | 启动 Docker Desktop，为启动器选中的那套 Ubuntu 开启 WSL 集成。 |
+| Docker Desktop 尚未启动就报 `sailor-ingest.sock` 或 `engine.sock` 无法访问 | 属于 Docker Desktop 启动故障。[Docker 问题记录 536](https://github.com/docker/desktop-feedback/issues/536) 描述了类似情况：备份运行目录并关闭可选的 Docker AI 功能后恢复。应保留 Docker 数据；算力安装器不会重置 Docker 或删除其虚拟磁盘。 |
 | Ubuntu 中 Docker 权限不足 | 配置普通用户的 Docker 权限；用户组变更后可能需要重新登录，不要把整个算力端改为 root 运行。 |
 | 无法配对主控 | 从这台算力机打开配对文件里的主控地址，确认主控在运行、IP/端口正确、防火墙与 VPN 路由允许；主控需要 0.2 或更新版本。 |
 | 镜像下载失败/超时 | 检查 Docker 自身的网络和代理，修复后重跑入口，不要跳过摘要校验。 |

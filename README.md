@@ -87,6 +87,10 @@ controller folder, enter that worker's IPv4 address and accept the Windows
 administrator prompt. The helper allows only that source IP to the saved
 controller TCP port. It does not change routers or VPN routes. If your campus or
 VPN policies block the connection, that network policy must be resolved first.
+An explicit Windows firewall **Block** rule overrides an Allow rule. If you
+previously denied this controller's Windows network prompt, review its bundled
+`runtime\python.exe` entry under Windows Defender Firewall → Advanced settings →
+Inbound Rules. The helper reports such a block and leaves it for you to review.
 
 ### 3. Start the worker
 
