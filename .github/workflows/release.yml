@@ -8,6 +8,9 @@ on:
         default: v0.2.0-rc.1
 permissions:
   contents: write
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
 jobs:
   release:
     runs-on: windows-latest

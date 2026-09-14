@@ -196,7 +196,10 @@ class AgentTests(unittest.TestCase):
     def test_demo_restart_marks_interrupted_never_launches_again(self):
         self.record("running")
         self.agent.close()
-        with patch("expman.agent.subprocess.Popen") as spawn:
+        with patch.object(Agent, "_exec", side_effect=OSError("No test GPU")):
+            snapshot = Agent.inspect_config(self.config)
+        with patch("expman.agent.subprocess.Popen") as spawn, \
+                patch.object(Agent, "snapshot", return_value=snapshot):
             self.agent = Agent(self.config)
             with patch("expman.agent.common.api_request", side_effect=OSError("offline")):
                 self.agent.tick()
@@ -438,7 +441,11 @@ class AgentTests(unittest.TestCase):
         record.update(container_name="expman-test", gpu_uuid="GPU-test", environment=record["spec"]["environments"][0])
         self.agent.mode = "drain"
         container = {"State": {"Running": False, "Status": "created"}}
-        with patch.object(self.agent, "_inspect", return_value=container), patch.object(self.agent, "_exec") as execute:
+        with patch.object(self.agent, "_exec", side_effect=OSError("No test GPU")):
+            snapshot = self.agent.snapshot()
+        self.assertFalse(snapshot["policy"]["run_enabled"])
+        with patch.object(self.agent, "_inspect", return_value=container), patch.object(self.agent, "_exec") as execute, \
+                patch.object(self.agent, "snapshot", return_value=snapshot):
             self.agent._reconcile(record)
         execute.assert_not_called()
         self.assertEqual(record["state"], "starting")

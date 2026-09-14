@@ -20,7 +20,7 @@ from .pairing import validate_pairing
 BASE_IMAGE = 'pytorch/pytorch@sha256:c16f4c749e2d9e96878875cdf6cc45cddda1d1a36fddd371dd6f2360f1b6e2a2'
 REGISTRY_IMAGE = 'registry:3'
 GPU_UUID = re.compile(r'GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
-DOCKERFILE = '''ARG BASE_IMAGE
+DOCKERFILE = '''ARG BASE_IMAGE=''' + BASE_IMAGE + '''
 FROM ${BASE_IMAGE}
 ENV PYTHONPATH=/opt/experiment-manager PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp XDG_CACHE_HOME=/tmp/cache OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
 COPY expman /opt/experiment-manager/expman
@@ -196,6 +196,9 @@ class WorkerSetup:
             self.command(['docker', 'pull', cache['reference']])
             return cache['reference']
         tag = 'localhost:5001/expman-runtime:' + self.source_id[:20]
+        # Docker Desktop's pull path can use its configured proxy even when
+        # BuildKit's direct metadata lookup cannot reach the registry.
+        self.command(['docker', 'pull', BASE_IMAGE], timeout=7200)
         self.command(['docker', 'build', '--build-arg', 'BASE_IMAGE=' + BASE_IMAGE, '-t', tag, '.'],
                      cwd=self.build_root, timeout=7200)
         _, output = self.command(['docker', 'push', tag], timeout=7200)
