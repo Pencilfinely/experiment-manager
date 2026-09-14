@@ -1,0 +1,51 @@
+{
+  "name": "SASRec-Video_Games-seed42",
+  "algorithm": "SASRec",
+  "group": "sasrec-baseline-v1",
+  "metric_protocol": "external_sasrec_original_v1",
+  "backend": "docker",
+  "source": {
+    "repo": "git@YOUR_GIT_HOST:YOUR_NAME/YOUR_ALGORITHM_REPO.git",
+    "commit": "REPLACE_WITH_40_CHARACTER_COMMIT"
+  },
+  "command": [
+    "python",
+    "-m",
+    "expman.adapters.sasrec",
+    "--project",
+    "/workspace/code/SASRec_Original"
+  ],
+  "environments": [
+    {
+      "profile": "sasrec-cu128",
+      "image": "YOUR_REGISTRY/sasrec-expman@sha256:REPLACE_WITH_64_CHARACTER_DIGEST"
+    }
+  ],
+  "assets": [
+    "sequence-splits-v1"
+  ],
+  "tags": [],
+  "params": {
+    "dataset": "Video_Games",
+    "data_asset": "sequence-splits-v1",
+    "device": "cuda",
+    "gpu_id": 0,
+    "seed": 42,
+    "epochs": 300,
+    "star_test": 100,
+    "validation_interval": 1,
+    "lr": 0.001,
+    "batch_size": 256,
+    "hidden_size": 64,
+    "max_seq_length": 50,
+    "num_workers": 0,
+    "torch_threads": 2
+  },
+  "resources": {
+    "gpu_memory_mb": 6000,
+    "cpu": 2,
+    "ram_mb": 8192,
+    "exclusive": true
+  },
+  "priority": 0
+}

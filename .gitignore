@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.runtime/
+*.sqlite*
+node.local.json
+hub.json
+.test-runs/
+
+*.local.json
+dist/
+*.pairing.json
+node.ready.json
+setup-state.json
+pairing.json
+# Local deployment diary: contains machine addresses and private project paths.
+docs/多机GPU实验新手操作手册.md
+docs/多机GPU实验体系说明书.md
+docs/验证报告.md
+docs/真实实验与部署升级.md
+docs/SASRec接入说明.md

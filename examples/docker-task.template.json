@@ -1,0 +1,15 @@
+{
+  "name": "算法A-数据集A",
+  "algorithm": "algorithm-a",
+  "group": "baseline-v1",
+  "metric_protocol": "SET_YOUR_EVALUATION_PROTOCOL",
+  "backend": "docker",
+  "source": {"repo": "git@YOUR_GIT_HOST:YOUR_NAME/YOUR_REPO.git", "commit": "REPLACE_WITH_40_CHARACTER_COMMIT"},
+  "command": ["python", "adapter_entry.py"],
+  "environments": [{"profile": "algorithm-a-cu128", "image": "YOUR_REGISTRY/algorithm-a@sha256:REPLACE_WITH_IMAGE_DIGEST"}],
+  "assets": ["dataset-a-v1", "text-encoder-v1"],
+  "tags": [],
+  "params": {"seed": 42, "learning_rate": 0.001, "batch_size": 64},
+  "resources": {"gpu_memory_mb": 5000, "cpu": 2, "ram_mb": 8192, "exclusive": true},
+  "priority": 0
+}

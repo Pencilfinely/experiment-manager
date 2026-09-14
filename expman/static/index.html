@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>实验台 · Experiment Manager</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div><span class="eyebrow">EXPERIMENT MANAGER · 0.2 PREVIEW</span><h1>实验台</h1><p>在各处运行，在这里记录。</p></div><div class="status"><span id="connection">未连接</span><button id="logout" class="subtle">更换令牌</button></div></header>
+<main>
+  <section id="login" class="card login"><h2>连接管理中心</h2><p>输入启动程序时显示的管理令牌。令牌只保存在当前浏览器会话。</p><form id="login-form"><input id="token" type="password" placeholder="管理令牌" required autocomplete="off"><button>连接</button></form></section>
+  <div id="notice" role="status" hidden></div>
+  <div id="workspace" hidden>
+    <div class="stats"><div><span>待执行</span><strong id="count-queue">0</strong></div><div><span>运行中</span><strong id="count-running">0</strong></div><div><span>已完成</span><strong id="count-done">0</strong></div><div><span>在线节点</span><strong id="count-nodes">0</strong></div></div>
+    <section class="card"><div class="section-title"><h2>计算节点</h2><button id="add-worker" class="subtle">添加算力机 / Add worker</button></div>
+      <form id="pair-form" hidden><p>下载的配对文件只交给这一台算力机。机器需要通过局域网或私网互通。<br>Give each worker its own pairing file. Use a reachable LAN or private-network address.</p>
+        <label>节点名称 / Worker name<input id="pair-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" placeholder="e.g. gpu-desktop" maxlength="64"></label>
+        <label>算力机可访问的主控地址 / Reachable controller URL<input id="pair-url" required type="url" list="pair-addresses" placeholder="http://controller-ip:8765"></label><datalist id="pair-addresses"></datalist>
+        <p class="muted">远程节点不能使用 localhost。同名节点会导出原配对身份，只有同一台机器重装时才复用名称。<br>Do not use localhost for remote workers. Reuse a name only when reinstalling the same worker.</p>
+        <button>下载配对文件 / Download pairing file</button><button id="pair-close" type="button" class="subtle">关闭 / Close</button>
+      </form><div id="nodes" class="nodes"></div></section>
+    <div class="columns">
+      <section class="card"><div class="section-title"><h2>实验记录</h2><button id="export" class="subtle">导出结果 CSV</button></div><input id="filter" placeholder="筛选名称、算法或实验组" aria-label="筛选实验"><div class="table-wrap"><table><thead><tr><th>实验 / 分组</th><th>状态</th><th>节点</th><th>最近指标</th></tr></thead><tbody id="jobs"></tbody></table></div><p id="empty" class="muted">还没有实验。等待算力机上线后，填入节点的验收任务。</p></section>
+      <section class="card submit"><h2>提交实验</h2><p class="muted">从节点模板或任务文件填入实验。演示按钮仅用于单独启动的 CPU 演示模式。</p><form id="submit-form"><div class="actions"><button id="import-task" type="button" class="subtle">从文件导入任务</button><input id="task-file" type="file" accept=".json,application/json" hidden></div><label>实验定义 <button id="demo-template" type="button" class="text-button">填入演示</button><textarea id="spec" rows="15" spellcheck="false" required></textarea></label><label>参数组合 <span class="muted">留 {} 表示只跑一次</span><textarea id="grid" rows="3" spellcheck="false">{}</textarea></label><p class="muted">例如 {"seed":[42,43]} 会生成两条独立实验。最多一次 256 个组合。</p><button id="submit-button">提交到队列</button></form></section>
+    </div>
+    <section id="detail" class="card" hidden><div class="section-title"><div><span class="eyebrow">RUN DETAILS</span><h2 id="detail-name">实验详情</h2></div><button id="close-detail" class="subtle">关闭</button></div><div id="actions" class="actions"></div><p id="detail-state"></p><div class="detail-columns"><div><h3>指标变化</h3><select id="metric-select" aria-label="选择指标"></select><canvas id="chart" width="760" height="240"></canvas><p class="muted">按节点回传的指标采样绘制；完整逐步记录在归档 metrics.jsonl 中。</p><h3>最近日志</h3><pre id="live-log"></pre><h3>结果文件</h3><div id="artifacts"></div></div><div><h3>执行信息与参数</h3><pre id="detail-spec"></pre><h3>最近事件</h3><pre id="events"></pre></div></div></section>
+  </div>
+  <footer>主机离线时，已准备好的节点任务可继续运行。主机重新启动管理程序后，节点自动补传。停止请求需要节点在线接收。</footer>
+</main>
+<script src="/app.js" defer></script>
+</body></html>

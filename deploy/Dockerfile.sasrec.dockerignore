@@ -1,0 +1,8 @@
+**
+!expman/
+!expman/**
+!deploy/
+!deploy/Dockerfile.sasrec
+!deploy/Dockerfile.sasrec.dockerignore
+**/__pycache__/**
+**/*.pyc

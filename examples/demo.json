@@ -1,0 +1,9 @@
+{
+  "name": "第一次演示",
+  "algorithm": "demo",
+  "group": "tutorial",
+  "metric_protocol": "demo-v1",
+  "backend": "demo",
+  "params": {"steps": 30, "delay": 0.3, "seed": 42},
+  "resources": {"gpu_memory_mb": 0, "cpu": 1, "ram_mb": 256, "exclusive": false}
+}

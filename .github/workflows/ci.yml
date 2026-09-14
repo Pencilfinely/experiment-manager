@@ -1,0 +1,36 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -t . -v
+      - run: python -m compileall -q expman scripts
+      - run: node --check expman/static/app.js
+      - if: runner.os == 'Linux'
+        run: |
+          bash -n deploy/release/Start-Worker.sh
+          bash -n deploy/release/Configure-Project.sh
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem deploy/release/*.ps1 | ForEach-Object {
+            $errors = $null
+            $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { throw ($errors | Out-String) }
+          }

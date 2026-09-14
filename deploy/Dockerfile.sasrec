@@ -1,0 +1,19 @@
+# Build from the software directory, not from the algorithm/data directory.
+# This is a candidate environment until the target GPU smoke test passes.
+ARG BASE_IMAGE=pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
+FROM ${BASE_IMAGE}
+ENV PYTHONPATH=/opt/experiment-manager \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/cache \
+    OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2
+COPY expman /opt/experiment-manager/expman
+RUN python -c "import torch,numpy; print('torch=',torch.__version__,'numpy=',numpy.__version__)" \
+    && python -m pip freeze > /opt/experiment-manager/dependencies.txt
+WORKDIR /workspace/code
+ENTRYPOINT []
+CMD ["python", "-m", "expman.adapters.sasrec", "--help"]
+
