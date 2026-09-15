@@ -30,7 +30,7 @@ def application_files(root=ROOT):
             if path.is_symlink():
                 raise ValueError('Release inputs cannot be symlinks')
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md'):
+    for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md'):
         files[name] = (root / name).read_bytes()
     return files
 

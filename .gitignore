@@ -12,6 +12,7 @@ dist/
 node.ready.json
 setup-state.json
 pairing.json
+local-app/
 # Local deployment diary: contains machine addresses and private project paths.
 docs/多机GPU实验新手操作手册.md
 docs/多机GPU实验体系说明书.md
