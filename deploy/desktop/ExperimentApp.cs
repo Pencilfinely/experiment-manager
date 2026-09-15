@@ -273,7 +273,7 @@ namespace ExperimentManagerDesktop {
                     else if(!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
                 }
                 var result=App.Command("wsl.exe",argv.ToArray());
-                if(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing") {
+                if(action!="stop"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing")) {
                     if(heldDistribution!=distribution) {
                         if(workerHold!=null)workerHold.Dispose();
                         workerHold=Process.Start(new ProcessStartInfo("wsl.exe",App.Arguments("-d",distribution,"--exec","bash",package+"/Client-Worker.sh","_hold")){UseShellExecute=false,CreateNoWindow=true});
