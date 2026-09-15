@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.md)
 
-This guide covers the **0.3.0-rc.1 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+This guide covers the **0.3.0-rc.2 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
 
 ## Open, close a window, or stop a service
 
@@ -80,6 +80,25 @@ An offline worker does not silently cause a duplicate copy of its experiment to 
 
 ## Upgrade, backup and removal
 
+### Windows: check, download and install in the application
+
+Available in Experiment Center and Experiment Worker from **0.3.0-rc.2**. Each application updates its own role; update both if both are installed on the same computer.
+
+**Update workers first in a multi-computer deployment.** Let the updated workers reconnect and complete synchronization before updating Center. Center requires a fresh idle confirmation from each worker; an offline worker or older agent that cannot provide it prevents in-app installation. Update that worker and restore its connection before retrying Center.
+
+1. Open the application's status window or tray menu and choose **Check for updates**. The update window shows your current version, the available version and its release notes.
+2. Choose to download the update. The application retrieves the same-role Windows `Setup.exe` from [this project's GitHub Releases](https://github.com/Pencilfinely/experiment-manager/releases) and verifies its published size and SHA-256. A failed check prevents installation; retry the download or use the manual procedure below.
+3. You can leave the downloaded installer staged while work continues. Before installing, pause accepting work, finish experiments and pending uploads, and back up your data directories.
+4. Choose to install the downloaded update. The application checks for work that prevents a safe stop. If it reports busy or cannot establish that stopping is safe, finish the reported work and retry later.
+5. Once the service/agent has stopped safely, the old client exits and the downloaded installer opens. Follow the installer to complete the upgrade. The saved controller data-directory selection, Windows Ubuntu distribution, node configuration and login-startup preference are retained. A worker agent that was running restarts after the update; one that was stopped remains stopped.
+6. Open the updated application, verify its version, experiment history and worker identity, then resume accepting work.
+
+Updates require your action; checking or downloading alone does not install anything. Preview builds accept newer preview and stable releases; stable builds accept stable releases only. The release metadata and installers must be reachable from the computer through GitHub. SHA-256 detects a download that differs from the published checksum; installers are not code-signed.
+
+### First upgrade from an older version, Ubuntu and manual installation
+
+**0.3.0-rc.1 and earlier have no Check for updates entry.** Download 0.3.0-rc.2 manually once; future Windows releases can then use the application workflow above. Ubuntu workers continue to use downloaded packages and the existing scripts. Use this procedure for manual Windows upgrades as well:
+
 1. Pause accepting work and finish active experiments and pending uploads.
 2. Stop the old controller/agent in its client, then exit that client from the system tray. For a terminal deployment, press Ctrl+C in its old window. The installer refuses to replace a running same-role client; this is not a hot upgrade.
 3. Back up controller and worker data directories.
@@ -87,7 +106,7 @@ An offline worker does not silently cause a duplicate copy of its experiment to 
 5. Verify experiment history, node identity and project status, then resume accepting work.
 
 Updating a web page alone cannot upgrade an old worker's distribution protocol. Upgrade that computer's worker application when the project card requests it.
-Do not run two agents with one identity. Older **Update-Worker.cmd / Update-Worker.sh** entries remain for compatibility; use the new application for ordinary operation.
+Do not run two agents with one identity. **Update-Worker.cmd / Update-Worker.sh** reuse existing worker configuration with a package you have already downloaded; they do not check GitHub or download a release themselves.
 
 Replacing/removing application files and deleting experiment data are separate actions. Keep backups before deciding whether to remove data. Do not delete Docker virtual disks to perform an application upgrade.
 
@@ -106,3 +125,8 @@ Replacing/removing application files and deleting experiment data are separate a
 | Experiment stays queued | Check worker connectivity, project installation and resource budgets |
 | Task complete but files missing | Wait for pending uploads to reach zero, then refresh details |
 | Old agent already running | Stop its original entry and reuse its configuration rather than creating another identity |
+| No Check for updates entry | Install 0.3.0-rc.2 or later manually; Ubuntu workers use the package/script procedure |
+| Update check or download fails | Check access to GitHub Releases and try again; manual same-role installation remains available |
+| Update size or checksum does not match | Do not run that download; retry and use the checksum published with the intended release |
+| Update is downloaded but installation is blocked | Finish active work and pending uploads, then retry; check the application logs if service state cannot be verified |
+| Center cannot confirm a worker is idle | Update that worker first, reconnect it and complete synchronization, then retry Center; offline or older agents with unknown status block installation |

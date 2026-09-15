@@ -134,11 +134,46 @@ def _snapshot(value):
     return value
 
 
+def inspect_update_state(db):
+    """Inspect committed work using either the live DB or a read-only connection."""
+    terminal = tuple(TERMINAL)
+    placeholders = ",".join("?" for _ in terminal)
+    active = db.execute(f"SELECT COUNT(*) FROM jobs WHERE state NOT IN ({placeholders}) "
+                        "OR command_id>command_ack", terminal).fetchone()[0]
+    uploads = db.execute("SELECT COUNT(*) FROM uploads u WHERE NOT EXISTS "
+                         "(SELECT 1 FROM artifacts a WHERE a.job_id=u.job_id AND a.sha256=u.sha256)").fetchone()[0]
+    projects = db.execute("SELECT COUNT(*) FROM project_uploads WHERE completed_digest IS NULL").fetchone()[0]
+    deployments = db.execute("SELECT COUNT(*) FROM project_deployments WHERE status NOT IN ('installed','failed')").fetchone()[0]
+    uncertain = 0
+    for row in db.execute("SELECT id,last_seen,snapshot FROM nodes"):
+        node_id, last_seen, serialized = row
+        # An enrollment that has never connected and owns no work has nothing
+        # to drain. Every previously connected node needs fresh positive proof.
+        has_work = db.execute("SELECT 1 FROM jobs WHERE node_id=? LIMIT 1", (node_id,)).fetchone()
+        if last_seen == 0 and not has_work:
+            continue
+        snapshot = json.loads(serialized)
+        if now() - last_seen > 45 or snapshot.get("update_quiescent") is not True:
+            uncertain += 1
+    counts = dict(active_jobs=active, pending_uploads=uploads, pending_projects=projects + deployments,
+                  unverified_nodes=uncertain)
+    reasons = []
+    if active:
+        reasons.append(f"{active} 个实验或操作尚未完成")
+    if uploads or projects or deployments:
+        reasons.append("文件回传或项目分发尚未完成")
+    if uncertain:
+        reasons.append(f"{uncertain} 个节点尚未确认空闲和回传完成；请保持 Worker 在线等待同步，旧版本请先升级 Worker")
+    return dict(ready_for_update=not reasons, detail="；".join(reasons) or "实验和文件回传已完成，可以安装更新", **counts)
+
+
 class Hub:
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.updating = False
+        self.active_update_requests = 0
         self.project_upload_locks = {}
         self.local_imports = None
         self.config = read_json(self.root / "hub.json")
@@ -203,6 +238,8 @@ class Hub:
     @contextmanager
     def transaction(self):
         with self.lock:
+            if self.updating:
+                raise APIError(503, "Controller is stopping for an update; retry after it restarts")
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 yield
@@ -210,6 +247,31 @@ class Hub:
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+
+    @contextmanager
+    def update_request(self):
+        """Fence new HTTP mutations while an atomic update stop is accepted."""
+        with self.lock:
+            if self.updating:
+                raise APIError(503, "Controller is stopping for an update; retry after it restarts")
+            self.active_update_requests += 1
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.active_update_requests -= 1
+
+    def update_status(self, stop=False):
+        with self.lock:
+            result = inspect_update_state(self.db)
+            busy_imports = self.local_imports is not None and bool(self.local_imports.threads)
+            if self.active_update_requests or busy_imports or self.project_upload_locks:
+                result.update(ready_for_update=False, detail="正在处理请求或导入项目，请完成后重试")
+            if stop and result["ready_for_update"]:
+                # No mutation can enter after this check. Existing background
+                # imports and uploads were checked above, under the same lock.
+                self.updating = True
+            return result
 
     def close(self):
         if self.local_imports is not None:
@@ -759,12 +821,12 @@ def make_server(hub, host="127.0.0.1", port=8765):
         def _route(self):
             url = urlsplit(self.path)
             path = url.path
-            if self.command == "GET" and path in ("/", "/app.js", "/style.css"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
-                content_type = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}[filename]
+                content_type = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8", "favicon.ico": "image/vnd.microsoft.icon"}[filename]
                 self._bytes(static.read_bytes(), content_type)
                 return
             if not path.startswith("/api/"):
@@ -800,6 +862,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._send({"addresses": address_candidates(self.server.server_address[1])})
                 elif path == "/api/state":
                     self._send(hub.state())
+                elif path == "/api/update-status":
+                    self._send(hub.update_status())
                 elif path == "/api/job":
                     self._send(hub.job(parameter("id")))
                 elif path == "/api/results.csv":
@@ -833,7 +897,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                    "/api/local/imports/publish": imports.publish})
                 if path not in routes:
                     raise APIError(404, "Not found")
-                self._send(routes[path](payload))
+                with hub.update_request():
+                    self._send(routes[path](payload))
             else:
                 raise APIError(405, "Method not allowed")
 

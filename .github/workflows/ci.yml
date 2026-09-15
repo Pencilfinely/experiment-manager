@@ -28,6 +28,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test_desktop.ps1
+      - name: Windows update selection and download integrity tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_updates.ps1
       - if: runner.os == 'Linux'
         run: |
           bash -n deploy/release/Start-Worker.sh

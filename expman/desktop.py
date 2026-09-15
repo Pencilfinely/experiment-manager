@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import closing
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -127,6 +129,91 @@ def controller_stop(root):
     return dict(status, status='stopping', detail='正在停止主控；节点中的 Docker 实验继续运行')
 
 
+def _lock_is_held(path):
+    """Probe an existing lifecycle lock without creating one or trusting a PID."""
+    try:
+        stream = Path(path).open('r+b')
+    except FileNotFoundError:
+        return False
+    with stream:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                if not Path(path).stat().st_size:
+                    return False
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            return False
+        except OSError:
+            return True
+
+
+def controller_update_status(root):
+    root = Path(root).expanduser().resolve()
+    result = {'running': False, 'status': 'unknown', 'ready_for_update': False, 'root': str(root)}
+    try:
+        result.update(controller_status(root))
+        if result['running']:
+            if not result.get('managed'):
+                return dict(result, ready_for_update=False, detail='请先退出旧主控启动窗口，再安装更新')
+            config = read_json(root / 'hub.json')
+            request = urllib.request.Request(f'http://127.0.0.1:{result["port"]}/api/update-status',
+                headers={'Authorization': 'Bearer ' + config['admin_token']})
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=4) as response:
+                inspected = json.load(response)
+            if not isinstance(inspected.get('ready_for_update'), bool):
+                raise ValueError('主控未提供有效的更新检查结果')
+            return dict(result, **inspected)
+        if _lock_is_held(root / 'controller.lock') or _lock_is_held(root / 'desktop-start.lock'):
+            return dict(result, status='unknown', ready_for_update=False,
+                        detail='主控进程尚未退出或无法连接，不能确认可以更新')
+        pending = read_json(root / 'desktop-pending.json', {})
+        if time.time() - pending.get('started', 0) < 15:
+            return dict(result, status='starting', ready_for_update=False, detail='主控正在启动，请稍候')
+        database = root / 'hub.sqlite3'
+        if not database.is_file():
+            if (root / 'hub.json').exists():
+                return dict(result, ready_for_update=False, detail='主控数据库缺失，无法核查实验状态')
+            return dict(result, ready_for_update=True, detail='主控尚未配置，可以安装更新')
+        from .hub import inspect_update_state
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+            db.execute('BEGIN')
+            inspected = inspect_update_state(db)
+        return dict(result, **inspected)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError, TypeError) as error:
+        return dict(result, ready_for_update=False, detail='无法核查更新条件，请恢复服务后重试：' + str(error)[:300])
+
+
+def controller_stop_for_update(root):
+    """Ask the owning service to atomically check and fence new work before stop."""
+    root = Path(root).expanduser().resolve()
+    result = controller_update_status(root)
+    if not result['ready_for_update'] or not result['running']:
+        return result
+    request_id = uuid.uuid4().hex
+    owner = read_json(root / 'desktop-process.json', {})
+    if not owner.get('nonce'):
+        return dict(result, ready_for_update=False, detail='主控所有权已变化，请重试')
+    request_path = root / 'desktop-update-request.json'
+    atomic_json(request_path, {'nonce': owner['nonce'], 'request_id': request_id, 'expires': time.time() + 15})
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        reply = read_json(root / 'desktop-update-result.json', {})
+        if reply.get('request_id') == request_id:
+            return dict(result, **reply)
+        time.sleep(0.1)
+    # A late watcher must not shut down after the caller has abandoned installation.
+    current = read_json(request_path, {})
+    if current.get('request_id') == request_id:
+        request_path.unlink(missing_ok=True)
+    return dict(result, ready_for_update=False,
+                detail='安全停止检查超时，尚未安装更新；请确认主控空闲后重试。旧版本请手动退出后安装。')
+
+
 def controller_serve(root, port, host):
     from .hub import Hub, make_server
     root = Path(root).expanduser().resolve()
@@ -153,11 +240,32 @@ def controller_serve(root, port, host):
                 while not stopped.wait(0.25):
                     try:
                         requested = read_json(root / 'desktop-stop.json', {})
+                        update = read_json(root / 'desktop-update-request.json', {})
                     except (OSError, ValueError):
                         continue
                     if requested.get('nonce') == nonce:
                         server.shutdown()
                         return
+                    if (update.get('nonce') == nonce and update.get('request_id')
+                            and update.get('expires', 0) > time.time()):
+                        previous = read_json(root / 'desktop-update-result.json', {})
+                        if previous.get('request_id') == update['request_id']:
+                            continue
+                        try:
+                            with hub.lock:
+                                inspected = hub.update_status(stop=True)
+                                latest = read_json(root / 'desktop-update-request.json', {})
+                                if (latest.get('request_id') != update['request_id']
+                                        or update.get('expires', 0) <= time.time()):
+                                    hub.updating = False
+                                    continue
+                        except (OSError, ValueError, sqlite3.Error) as error:
+                            inspected = dict(ready_for_update=False, detail='无法核查实验状态：' + str(error)[:300])
+                        atomic_json(root / 'desktop-update-result.json', dict(inspected,
+                            request_id=update['request_id'], status='stopping' if inspected['ready_for_update'] else 'running'))
+                        if inspected['ready_for_update']:
+                            server.shutdown()
+                            return
             monitor = threading.Thread(target=watch, daemon=True)
             monitor.start()
             print('Controller running at http://127.0.0.1:' + str(server.server_address[1]), flush=True)
@@ -181,7 +289,8 @@ def main():
         if stream and hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('controller-start', 'controller-stop', 'controller-status', 'controller-serve', 'controller-open'))
+    parser.add_argument('action', choices=('controller-start', 'controller-stop', 'controller-status', 'controller-serve',
+                                         'controller-open', 'controller-update-status', 'controller-stop-for-update'))
     parser.add_argument('--root', default=str(default_controller_root()))
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--host', default='0.0.0.0')
@@ -196,6 +305,10 @@ def main():
             result = controller_start(args.root, args.port, args.host)
         elif args.action == 'controller-stop':
             result = controller_stop(args.root)
+        elif args.action == 'controller-update-status':
+            result = controller_update_status(args.root)
+        elif args.action == 'controller-stop-for-update':
+            result = controller_stop_for_update(args.root)
         elif args.action == 'controller-open':
             result = controller_start(args.root, args.port, args.host)
             if result.get('running'):

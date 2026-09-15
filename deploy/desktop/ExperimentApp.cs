@@ -19,6 +19,12 @@ namespace ExperimentManagerDesktop {
         internal static JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
         internal static string Package = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         internal static bool Worker;
+        internal static string Version {
+            get { using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppVersion")) {
+                if(stream==null) throw new InvalidOperationException("Application version resource is missing");
+                using(var reader=new StreamReader(stream))return reader.ReadToEnd().Trim();
+            } }
+        }
         internal static string Role { get { return Worker ? "Worker" : "Controller"; } }
         internal static string Title { get { return Worker ? "实验算力 · Experiment Worker" : "实验台 · Experiment Center"; } }
         internal static string Executable { get { return Worker ? "ExperimentWorker.exe" : "ExperimentCenter.exe"; } }
@@ -47,6 +53,14 @@ namespace ExperimentManagerDesktop {
             b.Append('\\',slashes*2); return b.Append('"').ToString();
         }
         internal static string Arguments(params string[] args) { return string.Join(" ",Array.ConvertAll(args,Quote)); }
+        internal static Icon LoadIcon(Size size) {
+            using(var resource=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppIcon")) {
+                if(resource==null) throw new InvalidOperationException("Application icon resource is missing");
+                // Select a frame from the multi-size ICO, then detach it from the
+                // resource stream. Each caller owns and disposes its returned icon.
+                using(var icon=new Icon(resource,size)) return (Icon)icon.Clone();
+            }
+        }
         internal static string Run(string executable, params string[] args) {
             var info=new ProcessStartInfo(executable,Arguments(args)) { WorkingDirectory=Package, UseShellExecute=false, CreateNoWindow=true,
                 RedirectStandardOutput=true, RedirectStandardError=true, StandardOutputEncoding=Encoding.UTF8, StandardErrorEncoding=Encoding.UTF8 };
@@ -77,6 +91,16 @@ namespace ExperimentManagerDesktop {
             dynamic link=shell.CreateShortcut(destination); link.TargetPath=target; link.Arguments=arguments;
             link.WorkingDirectory=Path.GetDirectoryName(target); link.Description=Title; link.IconLocation=target+",0"; link.Save();
         }
+        internal static void WaitForPreviousClient(string[] args) {
+            string raw=Arg(args,"--wait-pid");if(raw==null)return;
+            int pid;long started;
+            if(!int.TryParse(raw,out pid)||pid<=0||pid==Process.GetCurrentProcess().Id||!long.TryParse(Arg(args,"--wait-start"),out started))
+                throw new Exception("更新交接参数无效，请重新打开安装程序。");
+            try { using(var previous=Process.GetProcessById(pid)) {
+                if(previous.StartTime.ToUniversalTime().Ticks==started&&!previous.WaitForExit(60000))
+                    throw new Exception("旧客户端尚未退出，请从托盘退出后重新打开安装程序。");
+            } } catch(ArgumentException) { /* The old client has already exited. */ }
+        }
         [STAThread] static void Main(string[] args) {
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             try {
@@ -85,21 +109,31 @@ namespace ExperimentManagerDesktop {
                     else Worker=File.ReadAllText(Path.Combine(Package,"release-role.json")).Contains("worker");
                 }
                 if(Has(args,"--self-test")) {
+                    // .NET Framework selects at most 128 px from this multi-size
+                    // ICO; the 256 px frame remains available to Windows Explorer.
+                    int[] runtimeIconSizes={16,20,24,32,40,48,64,128};
+                    foreach(int size in runtimeIconSizes) using(var icon=LoadIcon(new Size(size,size))) using(var bitmap=icon.ToBitmap()) {
+                        if(bitmap.Width!=size||bitmap.Height!=size) throw new Exception("Application icon frame is missing: "+size);
+                    }
+                    string iconHash;
+                    using(var resource=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppIcon")) using(var hash=SHA256.Create())
+                        iconHash=BitConverter.ToString(hash.ComputeHash(resource)).Replace("-","").ToLowerInvariant();
                     int payloadFiles=0;
                     using(var payload=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppPayload")) if(payload!=null) using(var zip=new ZipArchive(payload,ZipArchiveMode.Read)) {
                         if(zip.GetEntry(Executable)==null||zip.GetEntry("release-role.json")==null) throw new Exception("Incomplete application payload");
                         foreach(var item in zip.Entries) { using(var input=item.Open()) {byte[] buffer=new byte[65536];while(input.Read(buffer,0,buffer.Length)>0){} }payloadFiles++; }
                     }
-                    File.WriteAllText(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-test.json"), Json.Serialize(new { role=Role, executable=Executable, status="passed",payload_files=payloadFiles })); return;
+                    File.WriteAllText(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-test.json"), Json.Serialize(new { role=Role, version=Version, executable=Executable, status="passed",payload_files=payloadFiles,icon_sha256=iconHash,runtime_icon_sizes=runtimeIconSizes })); return;
                 }
                 using(var payload=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppPayload")) if(payload!=null) {
+                    WaitForPreviousClient(args);
                     if(Has(args,"--install")) {
                         string dataRoot=Arg(args,"--data-root")??Text(Read(SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
                         bool startup=Has(args,"--startup");
                         using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) startup=startup||(run!=null&&run.GetValue("ExperimentManager-"+Role)!=null);
                         string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),Has(args,"--desktop"),startup);
                         Write(Arg(args,"--report")??Path.Combine(SettingsRoot,"install-report.json"),new {status="installed",role=Role,path=installed});
-                    } else Application.Run(new InstallerForm(args));
+                    } else using(var form=new InstallerForm(args)) Application.Run(form);
                     return;
                 }
                 string key=InstanceKey; bool created;
@@ -116,6 +150,8 @@ namespace ExperimentManagerDesktop {
     }
 
     sealed class InstallerForm : Form {
+        bool installing;
+        readonly Icon appIcon=App.LoadIcon(SystemInformation.IconSize);
         Button install=new Button { Text="安装并启动 / Install", AutoSize=true };
         CheckBox desktop=new CheckBox { Text="创建桌面快捷方式", Checked=true, AutoSize=true };
         CheckBox startup=new CheckBox { Text="登录 Windows 后后台启动", Checked=false, AutoSize=true };
@@ -123,8 +159,12 @@ namespace ExperimentManagerDesktop {
         TextBox pairing=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
         Label status=new Label { AutoSize=true,MaximumSize=new Size(530,0) };
         internal InstallerForm(string[] args) {
-            Text="安装 "+App.Title; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
+            Text="安装 "+App.Title; Icon=appIcon; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
             using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) startup.Checked=run!=null&&run.GetValue("ExperimentManager-"+App.Role)!=null;
+            var saved=App.Read(App.SettingsFile);
+            if(App.Has(args,"--apply-update"))desktop.Checked=saved.ContainsKey("desktop_shortcut")?App.Flag(saved,"desktop_shortcut"):
+                File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.Worker?"实验算力.lnk":"实验台.lnk"));
+            if(App.Worker)pairing.Text=App.Text(saved,"pairing_file");
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
             var panel=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=8 };
             panel.Controls.Add(new Label { Text=App.Title,Font=new Font(Font.FontFamily,19,FontStyle.Bold),AutoSize=true });
@@ -137,13 +177,19 @@ namespace ExperimentManagerDesktop {
             else { data.Text=App.Arg(args,"--data-root")??App.Text(App.Read(App.SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller")); row.Controls.Add(data,0,0); browse.Click+=(s,e)=>{ using(var f=new FolderBrowserDialog { Description="选择实验台数据目录",SelectedPath=data.Text }) if(f.ShowDialog()==DialogResult.OK) data.Text=f.SelectedPath; }; }
             row.Controls.Add(browse,1,0); panel.Controls.Add(row); panel.Controls.Add(desktop); panel.Controls.Add(startup); panel.Controls.Add(status); panel.Controls.Add(install); Controls.Add(panel);
             install.Click+=async (s,e)=> {
-                install.Enabled=false; status.Text="正在安装…";
+                if(installing)return;installing=true;install.Enabled=false; status.Text="正在安装…";
                 try {
                     string dataPath=data.Text,credential=pairing.Text; bool makeDesktop=desktop.Checked,autoStart=startup.Checked;
                     string destination=await Task.Run(()=>Install(dataPath,credential,makeDesktop,autoStart));
-                    Process.Start(new ProcessStartInfo(Path.Combine(destination,App.Executable)){WorkingDirectory=destination,UseShellExecute=true}); Close();
-                } catch(Exception ex) { status.Text=ex.Message; install.Enabled=true; }
+                    Process.Start(new ProcessStartInfo(Path.Combine(destination,App.Executable),App.Worker&&App.Has(args,"--resume-service")?"--background":""){WorkingDirectory=destination,UseShellExecute=true}); installing=false;Close();
+                } catch(Exception ex) { status.Text=ex.Message; installing=false;install.Enabled=true; }
             };
+            FormClosing+=(s,e)=>{if(installing){e.Cancel=true;status.Text="正在安装，请等待完成后再关闭。";}};
+            if(App.Has(args,"--apply-update"))Shown+=(s,e)=>install.PerformClick();
+        }
+        protected override void Dispose(bool disposing) {
+            base.Dispose(disposing);
+            if(disposing) appIcon.Dispose();
         }
         internal static string Install(string dataPath,string credential,bool makeDesktop,bool autoStart) {
             Mutex active;
@@ -177,7 +223,7 @@ namespace ExperimentManagerDesktop {
                 var settings=App.Read(App.SettingsFile);
                 if(!App.Worker) settings["data_root"]=Path.GetFullPath(dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
-                settings["installed_version"]=version; App.Write(App.SettingsFile,settings);
+                settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
                 string target=Path.Combine(destination,App.Executable);
                 string menu=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs","Experiment Manager",App.Role+".lnk");
                 App.Shortcut(menu,target,"");
@@ -192,7 +238,11 @@ namespace ExperimentManagerDesktop {
     }
 
     sealed class ClientForm : Form {
+        readonly Icon appIcon=App.LoadIcon(SystemInformation.IconSize);
+        readonly Icon trayIcon=App.LoadIcon(SystemInformation.SmallIconSize);
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
+        UpdateForm updateDialog;
+        bool resumeWorkerAfterUpdate;
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
@@ -204,7 +254,7 @@ namespace ExperimentManagerDesktop {
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
             string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
-            Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
+            Text=App.Title; Icon=appIcon; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -230,14 +280,16 @@ namespace ExperimentManagerDesktop {
             AddButton(actions,App.Worker?"启动后台代理":"打开实验台",()=> { if(App.Worker) StartWorker(); else OpenController(); });
             AddButton(actions,App.Worker?"停止代理":"停止主控",()=>Stop());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
+            AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
             layout.Controls.Add(new Label {AutoSize=true,MaximumSize=new Size(810,0),Text=App.Worker?"首次导入凭证后自动检查 GPU 和准备环境。关闭此窗口会保留后台运行；停止代理不会终止已有 Docker 训练容器。":"实验、算力和算法项目在同一应用窗口中管理。关闭实验台窗口后，主控继续后台运行。"});
             layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
             Controls.Add(layout);
-            tray=new NotifyIcon { Icon=SystemIcons.Application,Text=App.Title,Visible=true };
+            tray=new NotifyIcon { Icon=trayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
+            menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出客户端（后台继续运行）",null,(s,e)=>{exiting=true;Close();}); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
-            FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;tray.Dispose();}};
+            FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
             timer.Tick+=(s,e)=>RefreshState();
             Shown+=async (s,e)=> {
                 if(App.Worker) {
@@ -252,9 +304,80 @@ namespace ExperimentManagerDesktop {
                 timer.Start();
             };
         }
+        protected override void Dispose(bool disposing) {
+            if(disposing) {
+                timer.Dispose();
+                if(tray!=null) { tray.Visible=false; tray.Dispose(); tray=null; }
+            }
+            base.Dispose(disposing);
+            if(disposing) { appIcon.Dispose(); trayIcon.Dispose(); }
+        }
         static void AddButton(Control parent,string text,Action action) {var button=new Button {Text=text,AutoSize=true,Margin=new Padding(0,8,12,8)};button.Click+=(s,e)=>action();parent.Controls.Add(button);}
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}}finally{busy=false;} }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
+        void CheckUpdates(){
+            if(updateDialog!=null){updateDialog.Activate();return;}
+            if(busy){MessageBox.Show("当前操作完成后再检查更新。",App.Title);return;}
+            try {using(var dialog=new UpdateForm(this)){updateDialog=dialog;dialog.ShowDialog(this);}}
+            finally {updateDialog=null;}
+        }
+        internal async Task InstallUpdate(UpdateRelease release,string installer) {
+            if(busy)throw new Exception("当前操作尚未完成，请稍后安装。");
+            busy=true;timer.Stop();
+            bool wasRunning=false,stopRequested=false;
+            Exception failure=null;
+            try {
+                await Task.Run(()=>UpdateService.ValidateDownloaded(release,installer));
+                string report=Path.Combine(App.SettingsRoot,"updates","verify-"+Guid.NewGuid().ToString("N")+".json");
+                try {
+                    await Task.Run(()=>App.Run(installer,"--self-test","--report",report));
+                    var result=App.Read(report);
+                    if(App.Text(result,"status")!="passed"||App.Text(result,"role")!=App.Role||App.Text(result,"version")!=release.Version||
+                        !result.ContainsKey("payload_files")||Convert.ToInt32(result["payload_files"])<=0)
+                        throw new Exception("安装包版本或角色不匹配，请重新下载。");
+                } finally {if(File.Exists(report))File.Delete(report);}
+                var ready=App.Worker?await WorkerCommand("update-status"):await Controller("controller-update-status");
+                if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","实验或文件回传尚未完成。"));
+                wasRunning=App.Flag(ready,"running");
+                resumeWorkerAfterUpdate=resumeWorkerAfterUpdate||(App.Worker&&wasRunning);
+                stopRequested=true;
+                var stopped=App.Worker?await WorkerCommand("stop-for-update"):await Controller("controller-stop-for-update");
+                if(!App.Flag(stopped,"ready_for_update"))throw new Exception(App.Text(stopped,"detail","暂时无法安全停止服务。"));
+                bool running=true;
+                for(int attempt=0;attempt<40;attempt++) {
+                    var state=App.Worker?await WorkerCommand("status"):await Controller("controller-status");
+                    running=App.Flag(state,"running");if(!running)break;
+                    await Task.Delay(250);
+                }
+                if(running)throw new Exception("服务仍在退出，请稍后再次安装。");
+                ready=App.Worker?await WorkerCommand("update-status"):await Controller("controller-update-status");
+                if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","停止后检查未通过。"));
+                await Task.Run(()=>UpdateService.ValidateDownloaded(release,installer));
+                using(var self=Process.GetCurrentProcess()) {
+                    var arguments=new List<string>{"--apply-update","--wait-pid",self.Id.ToString(),"--wait-start",self.StartTime.ToUniversalTime().Ticks.ToString()};
+                    if(resumeWorkerAfterUpdate)arguments.Add("--resume-service");
+                    var next=Process.Start(new ProcessStartInfo(installer,App.Arguments(arguments.ToArray())){UseShellExecute=false,CreateNoWindow=true});
+                    if(next==null)throw new Exception("无法启动更新安装程序。");
+                    next.Dispose();
+                }
+            } catch(Exception ex) {failure=ex;}
+            if(failure!=null) {
+                string recovery="";
+                if(stopRequested&&wasRunning) {
+                    try {
+                        var current=App.Worker?await WorkerCommand("status"):await Controller("controller-status");
+                        if(!App.Flag(current,"running")) {
+                            var restored=App.Worker?await WorkerCommand("start"):await Controller("controller-start");
+                            if(!App.Flag(restored,"running")&&App.Text(restored,"status")!="starting")
+                                throw new Exception(App.Text(restored,"detail","服务未能启动。"));
+                            recovery=" 原服务已重新启动。";
+                        }
+                    } catch(Exception restoreError) {recovery=" 原服务恢复失败，请在客户端重新启动："+restoreError.Message;}
+                }
+                busy=false;timer.Start();throw new Exception(failure.Message+recovery,failure);
+            }
+        }
+        internal void FinishUpdateExit(){exiting=true;Close();}
         internal void OpenFromTray(){if(App.Worker)ShowStatus();else OpenController();}
         async Task<Dictionary<string,object>> Controller(string action) {
             string root=data.Text; var value=await Task.Run(()=>App.Command(Path.Combine(App.Package,"runtime","python.exe"),"-m","expman.desktop",action,"--root",root));
@@ -273,7 +396,8 @@ namespace ExperimentManagerDesktop {
                     else if(!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
                 }
                 var result=App.Command("wsl.exe",argv.ToArray());
-                if(action!="stop"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing")) {
+                if(action=="update-status")return result;
+                if(action!="stop"&&action!="stop-for-update"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing")) {
                     if(heldDistribution!=distribution) {
                         if(workerHold!=null)workerHold.Dispose();
                         workerHold=Process.Start(new ProcessStartInfo("wsl.exe",App.Arguments("-d",distribution,"--exec","bash",package+"/Client-Worker.sh","_hold")){UseShellExecute=false,CreateNoWindow=true});

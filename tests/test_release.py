@@ -252,6 +252,8 @@ class NativeDesktopBuildTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b'MZcompiled-test-fixture')
             self.assertIn('/target:winexe', captured[0])
             self.assertIn('/platform:x64', captured[0])
+            self.assertIn('/win32icon:' + str(build_desktop.ICONS['worker']), captured[0])
+            self.assertIn('/resource:' + str(build_desktop.ICONS['worker']) + ',AppIcon', captured[0])
             self.assertFalse(list(root.glob('.desktop-build-*')))
             with self.assertRaises(FileExistsError):
                 build_desktop.compile_desktop(target, 'worker', compiler=compiler)
@@ -276,6 +278,7 @@ class ReleaseArchiveTests(unittest.TestCase):
         files = build_release.application_files()
         self.assertIn('README.zh-CN.md', files)
         self.assertIn('expman/launcher.py', files)
+        self.assertEqual(files['expman/static/favicon.ico'], build_desktop.ICONS['controller'].read_bytes())
         self.assertFalse(any('.runtime' in name or '验证报告' in name or name.endswith('.pairing.json') for name in files))
         for data in files.values():
             for forbidden in (b'DESKTOP-PRIVATE', b'private-node-token-for-test', b'PRIVATE_DATASET_CONTENT'):

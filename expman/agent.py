@@ -29,6 +29,24 @@ TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
 
 
+def inspect_update_state(db):
+    """Read one durable snapshot without opening an Agent or changing task state."""
+    records = [json.loads(row[0]) for row in db.execute("SELECT record FROM tasks")]
+    acknowledged = dict(db.execute("SELECT job_id,seq FROM report_acks"))
+    pending_uploads = db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
+    deliveries = db.execute("SELECT value FROM metadata WHERE key='project_deliveries'").fetchone()
+    projects = json.loads(deliveries[0]) if deliveries else {}
+    counts = {
+        "active_jobs": sum(record["state"] not in TERMINAL for record in records),
+        "pending_reports": sum(record["seq"] > acknowledged.get(record["id"], 0) for record in records),
+        "pending_archives": sum(record["state"] in TERMINAL and record.get("archive_scanned") is not True
+                                for record in records),
+        "pending_uploads": pending_uploads,
+        "pending_projects": sum(item["status"] not in ("installed", "failed") for item in projects.values()),
+    }
+    return {"ready_for_update": not any(counts.values()), **counts}
+
+
 def _pid_alive(pid):
     """Read-only process existence test; os.kill(pid, 0) is unsafe on Windows."""
     if not pid:
@@ -249,6 +267,11 @@ class Agent:
         result["capabilities"] = ["project-bundle-v1"] if sys.platform == "linux" else []
         result["pending_uploads"] = (self.db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
                                      if hasattr(self, "db") else None)
+        # The controller must not infer a finished archive from a terminal job
+        # report: output scanning and uploads happen later in the same tick.
+        result["update_quiescent"] = (inspect_update_state(self.db)["ready_for_update"]
+                                      and self.preparation is None
+                                      and not self.project_delivery.installing) if hasattr(self, "db") else None
         for name, value in self.config.get("assets", {}).items():
             path = Path(value)
             if path.is_absolute() and path.exists():

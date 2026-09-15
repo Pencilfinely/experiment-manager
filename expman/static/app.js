@@ -21,7 +21,18 @@ function showView(view){
   history.replaceState(null,'',location.pathname+location.search+'#'+view);
   if(view==='projects'&&token)void loadImportHistory();
 }
-document.querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>showView(button.dataset.view));
+document.querySelectorAll('[data-view]').forEach(button=>{button.onclick=()=>showView(button.dataset.view);button.title=viewLabels[button.dataset.view][0];button.setAttribute('aria-label',button.title);});
+let sidebarCollapsed=false;
+try{sidebarCollapsed=localStorage.getItem('expman_sidebar_collapsed')==='true';}catch{}
+function setSidebarCollapsed(collapsed,persist=true){
+  sidebarCollapsed=collapsed;document.body.classList.toggle('sidebar-collapsed',collapsed);
+  const label=collapsed?'展开侧栏':'收起侧栏';
+  $('sidebar-toggle').setAttribute('aria-expanded',String(!collapsed));$('sidebar-toggle').setAttribute('aria-label',label);$('sidebar-toggle').title=label;
+  $('sidebar-toggle-label').textContent=label;$('sidebar-toggle-icon').textContent=collapsed?'›':'‹';
+  if(persist)try{localStorage.setItem('expman_sidebar_collapsed',String(collapsed));}catch{}
+}
+$('sidebar-toggle').onclick=()=>setSidebarCollapsed(!sidebarCollapsed);
+setSidebarCollapsed(sidebarCollapsed,false);
 document.querySelectorAll('[data-go]').forEach(button=>button.onclick=()=>showView(button.dataset.go));
 document.querySelector('.brand').onclick=event=>{event.preventDefault();showView('overview');};
 $('settings-address').textContent=location.origin;

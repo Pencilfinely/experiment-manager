@@ -257,6 +257,10 @@ class HubTests(unittest.TestCase):
                 headers["Authorization"] = "Bearer " + token
             return urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers), timeout=3)
         try:
+            # The browser requests its icon before administrator sign-in.
+            with request("/favicon.ico") as response:
+                self.assertEqual(response.headers.get_content_type(), "image/vnd.microsoft.icon")
+                self.assertEqual(response.read(), (Path(__file__).resolve().parents[1] / "assets/center.ico").read_bytes())
             for token, status in ((None, 401), (self.token, 403), ("fake", 401)):
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     request("/api/state", token)

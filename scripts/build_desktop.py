@@ -15,6 +15,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'deploy/desktop/ExperimentApp.cs'
+VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
+EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/desktop/DesktopUpdateForm.cs')
+ICONS = {'controller': ROOT / 'assets/center.ico', 'worker': ROOT / 'assets/worker.ico'}
 REFERENCES = ('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll',
               'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll', 'Microsoft.CSharp.dll')
 
@@ -41,6 +44,10 @@ def compile_desktop(output, role, payload=None, compiler=None):
     if output.exists():
         raise FileExistsError('Refusing to replace a compiled application: ' + str(output))
     source = SOURCE.resolve(strict=True)
+    extra_sources = [path.resolve(strict=True) for path in EXTRA_SOURCES]
+    icon = ICONS[role].resolve(strict=True)
+    if ',' in str(icon):
+        raise ValueError('Embedded icon path cannot contain a comma')
     executable = find_compiler(compiler)
     payload = Path(payload).resolve(strict=True) if payload is not None else None
     if payload is not None and ',' in str(payload):
@@ -51,13 +58,18 @@ def compile_desktop(output, role, payload=None, compiler=None):
     try:
         role_file = temporary / 'role.txt'
         role_file.write_text(role, encoding='utf-8')
+        version_file = temporary / 'version.txt'
+        version_file.write_text(VERSION, encoding='utf-8')
         target = temporary / output.name
         args = [str(executable), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
-                '/out:' + str(target), '/resource:' + str(role_file) + ',Role']
+                '/out:' + str(target), '/resource:' + str(role_file) + ',Role',
+                '/win32icon:' + str(icon), '/resource:' + str(icon) + ',AppIcon',
+                '/resource:' + str(version_file) + ',AppVersion']
         args.extend('/reference:' + name for name in REFERENCES)
         if payload is not None:
             args.append('/resource:' + str(payload) + ',AppPayload')
         args.append(str(source))
+        args.extend(str(path) for path in extra_sources)
         result = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
                                 errors='replace', timeout=180)
         if result.returncode:

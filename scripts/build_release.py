@@ -19,7 +19,7 @@ except ModuleNotFoundError:
     from build_desktop import compile_desktop, find_compiler
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.3.0-rc.1'
+VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
 PYTHON_VERSION = '3.13.15'
 PYTHON_URL = f'https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip'
 PYTHON_SHA256 = 'd1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf'
@@ -42,6 +42,8 @@ def application_files(root=ROOT):
             files[path.relative_to(root).as_posix()] = path.read_bytes()
     for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md', 'docs/EXTERNAL-HARNESS.md', 'docs/EXTERNAL-HARNESS.zh-CN.md', 'docs/RELEASE-0.3.0-rc.1.md'):
         files[name] = (root / name).read_bytes()
+    files['expman/static/favicon.ico'] = (root / 'expman/static/favicon.ico').read_bytes()
+    files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
     for name in ('examples/managed-project/train.py', 'examples/managed-project/expman_entry.py',
                  'examples/managed-project/check_local.py', 'examples/managed-project/example-data/train.csv',
                  'examples/sasrec-adaptation/managed_sasrec.py', 'examples/sasrec-adaptation/check_lesson.py'):

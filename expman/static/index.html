@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>实验台 · Experiment Manager</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>实验台 · Experiment Manager</title><link rel="icon" type="image/vnd.microsoft.icon" href="/favicon.ico"><link rel="stylesheet" href="/style.css"></head>
 <body>
 <aside id="sidebar" class="sidebar" aria-label="主导航" hidden>
-  <a class="brand" href="#overview"><span class="brand-mark">E</span><span>实验台<small>EXPERIMENT MANAGER</small></span></a>
+  <a class="brand" href="#overview" aria-label="实验台总览"><span class="brand-mark">E</span><span class="brand-copy">实验台<small>EXPERIMENT MANAGER</small></span></a>
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="收起侧栏" title="收起侧栏"><span id="sidebar-toggle-icon" aria-hidden="true">‹</span><span id="sidebar-toggle-label">收起侧栏</span></button>
   <nav><button class="nav-item active" data-view="overview" aria-current="page"><span aria-hidden="true">◫</span> 总览 <small>Overview</small></button><button class="nav-item" data-view="experiments"><span aria-hidden="true">▤</span> 实验记录 <small>Experiments</small></button><button class="nav-item" data-view="compute"><span aria-hidden="true">▦</span> 算力管理 <small>Workers</small></button><button class="nav-item" data-view="projects"><span aria-hidden="true">◇</span> 算法项目 <small>Projects</small></button><button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span> 设置与帮助 <small>Settings</small></button></nav>
   <div class="sidebar-bottom"><span class="status-dot"></span> 私有实验工作空间<p>源码、配置和每次运行分别保存</p></div>
 </aside>

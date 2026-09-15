@@ -5,8 +5,8 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.3.0-rc.1 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-This version adds Windows installers, application shortcuts and background operation. Signed MSI packages, automatic updates and unattended operating-system setup are not included.
+**0.3.0-rc.2 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+This version adds checking, downloading and installing updates in both Windows applications, plus distinct Center and Worker icons. Updates start when you request them; unattended background upgrades are not included.
 
 ## Download and install
 
@@ -93,7 +93,12 @@ Workers can continue already assigned, cached tasks during a temporary controlle
 
 ## Existing deployments and everyday use
 
-Before upgrading, finish tasks and pending uploads, stop the old controller/agent in its client, exit that client from its tray and install the new package for the same role. The installer asks you to exit an already running same-role client; it does not hot-replace a running installation. Select the original controller data directory, Ubuntu distribution and node configuration to retain identity and history.
+**Upgrading from 0.3.0-rc.1 or earlier:** download and install this release manually; those versions have no in-app update entry. Finish tasks and pending uploads, stop the old controller/agent in its client and exit that client from its tray before installing the same-role package.
+
+**From 0.3.0-rc.2 onward on Windows:** choose **Check for updates** in the application's status window or tray menu. Review the current/new versions and release notes, then download the matching Center or Worker installer. The application checks its size and SHA-256 before installation. You can download while busy and install later, after experiments and pending uploads finish. Installation checks that services can stop safely, exits the old client and opens the new installer. Your data-directory selection, Ubuntu distribution, node configuration and login-startup setting are retained.
+
+Preview versions check for newer previews and stable releases; stable versions check for stable releases only. Ubuntu workers continue to use a downloaded package and the existing script/manual upgrade procedure.
+
 Never run old and new agents against the same node directory at once. See [Everyday operations](docs/OPERATIONS.md) for upgrading, backups, background controls and troubleshooting.
 Use this preview on localhost or a trusted private network; it is not a public multi-tenant service.
 

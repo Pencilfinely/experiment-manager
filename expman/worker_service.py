@@ -6,6 +6,7 @@ configuration and its experiment directory remain the source of truth.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -13,9 +14,11 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 
 from . import __version__, common
 from .launcher import InstanceLock
@@ -246,6 +249,125 @@ def stop(service_root=None):
         return status(root)
 
 
+def _update_containers(candidate):
+    """Use exactly the Docker endpoint selected by the service; never stop a container."""
+    environment = dict(os.environ)
+    endpoint = common.read_json(Path(candidate['path']).parent / 'setup-state.json', {}).get('docker_endpoint')
+    if isinstance(endpoint, str) and endpoint.startswith('unix://'):
+        environment.pop('DOCKER_CONTEXT', None)
+        environment['DOCKER_HOST'] = endpoint
+    reply = subprocess.run(['docker', 'ps', '--all', '--filter', 'label=expman.node=' + candidate['node_id'],
+                            '--filter', 'label=expman.job', '--format', '{{json .}}'],
+                           capture_output=True, text=True, timeout=10, env=environment)
+    if reply.returncode:
+        raise ValueError('无法核查 Docker 容器，请先恢复 Docker 连接')
+    active = []
+    for line in reply.stdout.splitlines():
+        item = json.loads(line)
+        if not item.get('ID') or not isinstance(item.get('State'), str):
+            raise ValueError('Docker 返回了无法识别的容器状态')
+        if item['State'] != 'exited':
+            active.append(item['ID'])
+    return active
+
+
+def update_status(service_root=None):
+    """Inspect persisted work and Docker without constructing or recovering an Agent."""
+    root = _root(service_root)
+    result = {'running': False, 'status': 'unknown', 'ready_for_update': False}
+    try:
+        result.update(status(root))
+        if result.get('status') in ('starting', 'preparing', 'stopping', 'external_running'):
+            return dict(result, ready_for_update=False, detail='代理正在准备、停止或由旧入口运行，请完成后重试')
+        if result['running'] and (not result.get('online') or time.time() - result.get('updated_at', 0) > 45):
+            return dict(result, ready_for_update=False, detail='代理尚未确认与管理端同步，请恢复连接并等待同步完成')
+        settings = _settings(root)
+        config_path = settings.get('config')
+        if not config_path:
+            if result['running'] or settings.get('pairing'):
+                return dict(result, ready_for_update=False, detail='算力端配置尚未准备完成')
+            return dict(result, ready_for_update=True, detail='算力端尚未配置，可以安装更新')
+        candidate = _candidate(config_path)
+        if candidate is None:
+            return dict(result, ready_for_update=False, detail='无法读取原算力端配置，不能核查更新条件')
+        database = Path(candidate['root']) / 'node.sqlite3'
+        counts = {}
+        if database.exists():
+            from .agent import inspect_update_state
+            with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+                db.execute('BEGIN')
+                counts = inspect_update_state(db)
+            if not counts['ready_for_update']:
+                return dict(result, **counts, detail='仍有待执行实验、待扫描文件、未确认报告或文件回传，请完成后重试')
+        elif result['running']:
+            return dict(result, ready_for_update=False, detail='代理数据库缺失，无法核查实验状态')
+        containers = _update_containers(candidate)
+        if containers:
+            return dict(result, ready_for_update=False, active_containers=len(containers),
+                        detail=f'{len(containers)} 个受管 Docker 容器尚未退出，请等待实验完成')
+        return {**result, **counts, 'ready_for_update': True, 'detail': '实验和文件回传已完成，可以安装更新'}
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError, TypeError, subprocess.SubprocessError) as error:
+        try:
+            detail = _redact(root, str(error))[:300]
+        except (OSError, ValueError, TypeError, AttributeError):
+            detail = '配置或状态文件无法读取'
+        return dict(result, ready_for_update=False, detail='无法核查更新条件：' + detail)
+
+
+def stop_for_update(service_root=None):
+    """Request an idle tick-boundary stop, without sending SIGTERM or changing tasks."""
+    _require_linux()
+    root = _root(service_root)
+    with InstanceLock(root / 'control.lock'):
+        result = update_status(root)
+        if not result['ready_for_update'] or not result['running']:
+            return result
+        request_id = uuid.uuid4().hex
+        state = common.read_json(root / 'status.json', {})
+        request_path = root / 'update-request.json'
+        private_write(request_path, dict(request_id=request_id, pid=state.get('pid'),
+                      process_identity=state.get('process_identity'), expires=time.time() + 35))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            reply = common.read_json(root / 'update-result.json', {})
+            if reply.get('request_id') == request_id:
+                return dict(result, **reply)
+            time.sleep(0.1)
+        current = common.read_json(request_path, {})
+        if current.get('request_id') == request_id:
+            request_path.unlink(missing_ok=True)
+        return dict(result, ready_for_update=False,
+                    detail='安全停止检查超时，尚未安装更新；请待同步完成后重试。旧版本请手动退出后安装。')
+
+
+def _update_stop_at_boundary(root, agent):
+    """Runs only on the agent thread, between complete durable ticks."""
+    request = common.read_json(root / 'update-request.json', {})
+    owner = common.read_json(root / 'status.json', {})
+    if (not request.get('request_id') or request.get('expires', 0) <= time.time()
+            or request.get('pid') != owner.get('pid')
+            or request.get('process_identity') != owner.get('process_identity')):
+        return False
+    prior = common.read_json(root / 'update-result.json', {})
+    if prior.get('request_id') == request['request_id']:
+        return False
+    if agent.preparation or agent.project_delivery.installing:
+        result = dict(ready_for_update=False, detail='代理正在准备实验或安装项目，请完成后重试')
+    else:
+        result = update_status(root)
+    # Stop acceptance is the last operation before leaving this loop; no sync,
+    # launch or preparation can happen between the check and Agent.close().
+    latest = common.read_json(root / 'update-request.json', {})
+    if latest.get('request_id') != request['request_id'] or request.get('expires', 0) <= time.time():
+        return False
+    accepted = result['ready_for_update']
+    if accepted:
+        _write_status(root, status='stopping', detail='已确认空闲，正在安全停止以安装更新')
+    private_write(root / 'update-result.json', dict(result, request_id=request['request_id'],
+                  status='stopping' if accepted else owner.get('status', 'online')))
+    return accepted
+
+
 def _secret_values(root):
     settings = _settings(root)
     secrets = []
@@ -310,6 +432,8 @@ def _run_agent(root, config_path):
     previous = None
     try:
         while True:
+            if _update_stop_at_boundary(root, agent):
+                return
             snapshot = agent.tick()
             online = bool(snapshot['online'])
             detail = ('Connected to controller / 已连接管理端' if online else
@@ -359,6 +483,7 @@ def serve(service_root=None):
                 os.environ.pop('DOCKER_CONTEXT', None)
                 os.environ['DOCKER_HOST'] = endpoint
             _run_agent(root, str(config_path))
+            _write_status(root, status='stopped', online=False, detail='代理已安全停止，可以安装更新')
         except KeyboardInterrupt:
             _write_status(root, status='stopped', online=False,
                 detail='Agent stopped; Docker experiments keep running / 代理已停止，Docker 实验继续运行')
@@ -488,7 +613,8 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold'))
+    parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
+                                         'update-status', 'stop-for-update'))
     parser.add_argument('--service-root')
     parser.add_argument('--root', help='Worker data directory; separate from lifecycle settings')
     parser.add_argument('--config', help='Reuse this existing node configuration without changing it')
@@ -511,7 +637,7 @@ def main(argv=None):
         elif args.action == 'logs':
             value = logs(args.service_root, args.lines)
         else:
-            value = globals()[args.action](args.service_root)
+            value = globals()[args.action.replace('-', '_')](args.service_root)
         print(json.dumps(value, ensure_ascii=False))
         return 2 if value['status'] in ('failed', 'selection_required', 'pairing_required') else 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:

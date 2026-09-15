@@ -28,6 +28,32 @@ $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot '.runtime'))
 $testRoot = Join-Path $runtimeRoot ('desktop-tests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
+Add-Type -AssemblyName System.Drawing, System.Windows.Forms
+Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Runtime.InteropServices;
+public static class DesktopIconTest {
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
+    static extern uint ExtractIconEx(string path, int index, IntPtr[] large, IntPtr[] small, uint count);
+    [DllImport("user32.dll")]
+    static extern bool DestroyIcon(IntPtr icon);
+    public static Icon Extract(string path, bool useSmall) {
+        var large=new IntPtr[1]; var small=new IntPtr[1];
+        try {
+            uint count=ExtractIconEx(path,0,large,small,1);
+            if(count==0||count==UInt32.MaxValue) throw new Exception("Executable has no native icon: "+path);
+            IntPtr selected=useSmall?small[0]:large[0];
+            if(selected==IntPtr.Zero) throw new Exception("Executable icon could not be extracted: "+path);
+            using(var icon=Icon.FromHandle(selected)) return (Icon)icon.Clone();
+        } finally {
+            if(large[0]!=IntPtr.Zero) DestroyIcon(large[0]);
+            if(small[0]!=IntPtr.Zero) DestroyIcon(small[0]);
+        }
+    }
+}
+'@
+
 function Invoke-AppMethod($Method, [object[]]$Values) {
     try { return $Method.Invoke($null, $Values) }
     catch {
@@ -45,7 +71,7 @@ try {
 
         # Load bytes rather than locking the compiled executable on disk. No
         # Form, NotifyIcon, installer, WSL session, or application Main is invoked
-        # by reflection; only the real command transport methods are exercised.
+        # by reflection; command transport and icon loading are exercised directly.
         $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($executable))
         $app = $assembly.GetType('ExperimentManagerDesktop.App', $true)
         $flags = [Reflection.BindingFlags]'NonPublic,Static'
@@ -53,6 +79,49 @@ try {
         $quote = $app.GetMethod('Quote', $flags)
         $run = $app.GetMethod('Run', $flags)
         if (-not $quote -or -not $run) { throw 'Desktop command transport methods are missing.' }
+        $waitPrevious = $app.GetMethod('WaitForPreviousClient', $flags)
+        if (-not $waitPrevious) { throw 'Update handoff method is missing.' }
+        $waitInfo = New-Object Diagnostics.ProcessStartInfo
+        $waitInfo.FileName = $Python
+        $waitInfo.Arguments = '-c "import time; time.sleep(0.8)"'
+        $waitInfo.UseShellExecute = $false
+        $waitInfo.CreateNoWindow = $true
+        $previous = [Diagnostics.Process]::Start($waitInfo)
+        try {
+            $waitArgs = [string[]]@('--wait-pid', [string]$previous.Id, '--wait-start', [string]$previous.StartTime.ToUniversalTime().Ticks)
+            $null = Invoke-AppMethod $waitPrevious ([object[]]@(,$waitArgs))
+            if (-not $previous.HasExited) { throw 'Update installer did not wait for the previous client.' }
+        }
+        finally { $previous.Dispose() }
+
+        $loadIcon = $app.GetMethod('LoadIcon', $flags)
+        if (-not $loadIcon) { throw 'Desktop icon loader is missing.' }
+        foreach ($small in @($false, $true)) {
+            $size = if ($small) { [Windows.Forms.SystemInformation]::SmallIconSize } else { [Windows.Forms.SystemInformation]::IconSize }
+            $managedIcon = Invoke-AppMethod $loadIcon ([object[]]@($size))
+            $nativeIcon = $null
+            $managedBitmap = $null
+            $nativeBitmap = $null
+            try {
+                $nativeIcon = [DesktopIconTest]::Extract($executable, $small)
+                $managedBitmap = $managedIcon.ToBitmap()
+                $nativeBitmap = $nativeIcon.ToBitmap()
+                if ($managedBitmap.Size -ne $nativeBitmap.Size) { throw "$role native/managed icon sizes differ." }
+                for ($y = 0; $y -lt $managedBitmap.Height; $y++) {
+                    for ($x = 0; $x -lt $managedBitmap.Width; $x++) {
+                        if ($managedBitmap.GetPixel($x, $y).ToArgb() -ne $nativeBitmap.GetPixel($x, $y).ToArgb()) {
+                            throw "$role executable icon does not match its window/tray icon."
+                        }
+                    }
+                }
+            }
+            finally {
+                if ($nativeBitmap) { $nativeBitmap.Dispose() }
+                if ($managedBitmap) { $managedBitmap.Dispose() }
+                if ($nativeIcon) { $nativeIcon.Dispose() }
+                $managedIcon.Dispose()
+            }
+        }
 
         foreach ($option in @('--list', '-d', '--exec', '--')) {
             $quoted = Invoke-AppMethod $quote ([object[]]@($option))
@@ -96,7 +165,15 @@ try {
             $report.executable -cne $executableName -or $report.payload_files -ne 0) {
             throw "Invalid portable desktop self-test result for $role."
         }
-        Write-Output "PASS $role : native compilation, embedded role, bare options, exact Python argv roundtrip."
+        if ($report.version -cne (Get-Content -LiteralPath (Join-Path $repoRoot 'VERSION') -Raw).Trim()) {
+            throw "Compiled application version does not match VERSION: $role"
+        }
+        $iconName = if ($role -eq 'controller') { 'center.ico' } else { 'worker.ico' }
+        $expectedIconHash = (Get-FileHash -LiteralPath (Join-Path $repoRoot ('assets/' + $iconName)) -Algorithm SHA256).Hash
+        if ($report.icon_sha256 -ine $expectedIconHash -or ($report.runtime_icon_sizes -join ',') -ne '16,20,24,32,40,48,64,128') {
+            throw "Embedded icon resource or its frames do not match the expected role: $role"
+        }
+        Write-Output "PASS $role : native compilation, role-specific EXE/window/tray icons, WinForms ICO frames, embedded role, bare options, exact Python argv roundtrip."
     }
 }
 finally {

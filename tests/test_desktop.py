@@ -90,6 +90,20 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(reopened["running"])
         self.assertEqual(common.read_json(self.root / "hub.json"), before)
 
+    def test_update_status_and_cooperative_stop_leave_controller_data_intact(self):
+        self.serve()
+        identity = common.read_json(self.root / 'hub.json')
+        self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
+        result = desktop.controller_stop_for_update(self.root)
+        self.assertTrue(result['ready_for_update'])
+        self.assertEqual(result['status'], 'stopping')
+        self.thread.join(4)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.errors, [])
+        self.assertFalse(desktop.controller_status(self.root)['running'])
+        self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
+        self.assertEqual(common.read_json(self.root / 'hub.json'), identity)
+
     def test_status_refreshes_owner_published_while_health_probe_waits(self):
         common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
         common.atomic_json(self.root / "launcher.json", {"port": 8765})
