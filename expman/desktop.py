@@ -66,6 +66,10 @@ def controller_status(root):
                                          headers={'Authorization': 'Bearer ' + hub['admin_token']})
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=2) as response:
             value = json.load(response)
+        # The request may have waited for startup. The owner file is written
+        # before serve_forever, so refresh it after the successful health probe.
+        state = read_json(root / 'desktop-process.json', {})
+        result['managed'] = bool(state.get('nonce'))
         result.update(running=True, status='running', version=value.get('version'),
             nodes=len(value.get('nodes', [])), jobs=len(value.get('jobs', [])),
             detail='主控运行中；关闭应用窗口后继续在后台运行')

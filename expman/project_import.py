@@ -242,10 +242,17 @@ class ProjectImports:
                 draft = self.root / identity / "draft-0"
                 self._set(identity, phase="Discovering entry and parameters without running source")
                 prepare_project(source, draft, entry=entry, project_id=project_id)
-                self._set(identity, phase="Counting selected code and dataset files", draft_directory="draft-0")
-                preview = _preview(common.read_json(draft / "project.json"))
+                self._set(identity, phase="Counting selected code and dataset files")
+                try:
+                    preview = _preview(common.read_json(draft / "project.json"))
+                except Exception:
+                    # A failed selection remains editable, with no pending file writes.
+                    self._set(identity, draft_directory="draft-0")
+                    raise
                 common.atomic_json(draft / "preview.json", preview)
-                self._set(identity, status="ready", phase="Review parameters, dependencies and selected files")
+                # Readers only see a complete generation, never files being replaced.
+                self._set(identity, status="ready", draft_directory="draft-0",
+                          phase="Review parameters, dependencies and selected files")
             self._launch(identity, scan)
             return self._public(state)
 
@@ -305,13 +312,19 @@ class ProjectImports:
             if len(self.threads) >= 2:
                 raise ValueError("Two imports are already active; wait for one to finish")
             directory = self.root / identity / state["draft_directory"]
-            _validate_draft(_draft(directory), state["source"])
+            snapshot = _validate_draft(_draft(directory), state["source"])
             def build():
-                project = common.read_json(directory / "project.json")
-                project["reviewed"] = True
-                common.atomic_json(directory / "project.json", project)
+                # Keep the review generation immutable while the page polls it.
+                # Windows readers may reject opening a file during replacement,
+                # so the reviewed build state belongs in an unpublished directory.
+                build_directory = self.root / identity / ("build-config-" + uuid.uuid4().hex)
+                snapshot["project"]["reviewed"] = True
+                common.atomic_json(build_directory / "project.json", snapshot["project"])
+                common.atomic_json(build_directory / "harness.json", snapshot["harness"])
+                for experiment in snapshot["experiments"]:
+                    common.atomic_json(build_directory / "experiments" / (experiment["id"] + ".json"), experiment)
                 bundle = self.root / identity / ("bundle-" + uuid.uuid4().hex + ".zip")
-                result = build_project(directory, bundle)
+                result = build_project(build_directory, bundle)
                 self._set(identity, phase="Adding the verified snapshot to the algorithm library",
                           bytes=result["bytes"], files=result["files"])
                 upload_id = uuid.uuid4().hex

@@ -90,6 +90,18 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(reopened["running"])
         self.assertEqual(common.read_json(self.root / "hub.json"), before)
 
+    def test_status_refreshes_owner_published_while_health_probe_waits(self):
+        common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
+        common.atomic_json(self.root / "launcher.json", {"port": 8765})
+        def became_ready(*args, **kwargs):
+            common.atomic_json(self.root / "desktop-process.json", {"nonce": "newly-ready"})
+            return io.BytesIO(b'{"nodes":[],"jobs":[]}')
+        with patch("expman.desktop.urllib.request.build_opener") as opener:
+            opener.return_value.open.side_effect = became_ready
+            status = desktop.controller_status(self.root)
+        self.assertTrue(status["running"])
+        self.assertTrue(status["managed"])
+
     def test_stop_refuses_controller_without_desktop_ownership(self):
         self.root.mkdir()
         with patch("expman.desktop.controller_status", return_value={"running": True, "status": "running"}):

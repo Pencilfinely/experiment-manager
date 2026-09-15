@@ -139,6 +139,67 @@ class ProjectImportTests(unittest.TestCase):
                 release.set()
             self.assertEqual(self.wait(state["id"])["status"], "ready")
 
+    def test_publishing_builds_a_private_generation_while_visible_draft_is_immutable(self):
+        state = self.scan()
+        visible = self.imports.root / state["id"] / self.imports._load(state["id"])["draft_directory"]
+        before = {str(path.relative_to(visible)): path.read_bytes() for path in visible.rglob("*") if path.is_file()}
+        entered, release = threading.Event(), threading.Event()
+        build_directories = []
+        from expman.project_import import build_project
+        def delayed(directory, bundle):
+            build_directories.append(Path(directory))
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test did not release publication")
+            return build_project(directory, bundle)
+        with patch("expman.project_import.build_project", side_effect=delayed):
+            self.imports.publish({"id": state["id"], "reviewed": True})
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertNotEqual(build_directories[0], visible)
+                self.assertTrue(common.read_json(build_directories[0] / "project.json")["reviewed"])
+                for _ in range(5):
+                    polled = self.imports.item(state["id"])
+                    self.assertEqual(polled["status"], "building")
+                    self.assertFalse(polled["draft"]["project"]["reviewed"])
+                    self.assertEqual(polled["draft"], state["draft"])
+            finally:
+                release.set()
+            published = self.wait(state["id"])
+        self.assertEqual(published["status"], "published", published.get("error"))
+        after = {str(path.relative_to(visible)): path.read_bytes() for path in visible.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
+    def test_initial_scan_only_exposes_complete_draft_after_preview(self):
+        entered, release = threading.Event(), threading.Event()
+        from expman.project_import import _preview
+        def delayed(project):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test did not release preview")
+            return _preview(project)
+        with patch("expman.project_import._preview", side_effect=delayed):
+            state = self.imports.start({"source": str(self.source)})
+            try:
+                self.assertTrue(entered.wait(2))
+                polled = self.imports.item(state["id"])
+                self.assertEqual(polled["status"], "scanning")
+                self.assertNotIn("draft", polled)
+            finally:
+                release.set()
+            ready = self.wait(state["id"])
+        self.assertEqual(ready["status"], "ready", ready.get("error"))
+        self.assertEqual(ready["draft"]["preview"]["source_files"], 1)
+
+    def test_failed_initial_preview_exposes_a_stable_draft_for_correction(self):
+        with patch("expman.project_import._preview", side_effect=ValueError("Selection needs correction")):
+            state = self.imports.start({"source": str(self.source)})
+            failed = self.wait(state["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("draft", failed)
+        self.imports.save({"id": state["id"], **failed["draft"]})
+        self.assertEqual(self.wait(state["id"])["status"], "ready")
+
     def test_restart_marks_inflight_import_interrupted_but_preserves_draft(self):
         state = self.scan()
         self.imports._set(state["id"], status="building")
