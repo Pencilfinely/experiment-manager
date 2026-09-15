@@ -144,6 +144,8 @@ return work together. It is a deployment check, not a model-quality benchmark.
 
 ## Run your own experiments
 
+For an implementation walkthrough using the real SASRec training code, see the [step-by-step adaptation lesson (Chinese)](docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md) and its executable scripts in `examples/sasrec-adaptation`.
+
 Start with [the complete file-editing and cross-machine workflow](docs/ALGORITHM-INTEGRATION.md): a runnable added entry, a direct-versus-managed result check, and SASRec export, Xftp transfer, recipient installation and browser submission. The SASRec project transfer tool is new in the current source and is not in the published v0.2.0-rc.1 ZIPs.
 
 Installing the worker prepares the manager's runtime. Your algorithm, dataset and
