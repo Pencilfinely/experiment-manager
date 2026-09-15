@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching scripts/build_release.py VERSION
         required: true
-        default: v0.2.0-rc.2
+        default: v0.3.0-rc.1
 permissions:
   contents: write
 env:
@@ -27,7 +27,7 @@ jobs:
         run: python -c "import os; from scripts.build_release import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION"
       - run: python -m unittest discover -s tests -t . -v
       - run: python scripts/build_release.py --download-python
-      - name: Create draft with three application assets
+      - name: Create draft with application ZIPs and native Windows installers
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}

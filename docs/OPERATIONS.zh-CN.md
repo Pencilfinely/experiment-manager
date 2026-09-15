@@ -1,139 +1,108 @@
-# 运行与算法接入说明
+# 日常使用：实验、算力和算法项目
 
-[English](OPERATIONS.md) · [简体中文](OPERATIONS.zh-CN.md) · [先完成安装](../README.zh-CN.md)
+[English](OPERATIONS.md) · [返回安装说明](../README.zh-CN.md)
 
-## 一个从头能跑的小项目
+本说明适用于 **0.3.0-rc.1 桌面预览版**。日常操作从 Experiment Center 和 Experiment Worker 进入；旧版终端入口保留作兼容和诊断用途。
 
-下面的例子使用人工生成的输入，实际在 GPU 上计算。它用于熟悉实验台，不用于评价科研模型。
-在**算力机的 Ubuntu 终端**中执行：
+## 打开、关窗口和停止运行
 
-```bash
-mkdir -p ~/my-gpu-example
-cd ~/my-gpu-example
-git init
-cat > train.py <<'PY'
-import torch
-from expman.sdk import Run
+| 你想做什么 | 在哪里操作 | 会发生什么 |
+|---|---|---|
+| 打开实验台 | Windows 的 Experiment Center 入口或托盘 | 打开同一个管理服务，不创建第二份实验记录 |
+| 暂时收起实验台或算力窗口 | 关闭应用窗口 | 后台进程继续；之后可从托盘或应用入口打开 |
+| 让一台算力机暂时不接新实验 | 实验台 → 算力 → 暂停接单 | 当前实验继续，不再分配/启动新任务 |
+| 停止管理端 | Experiment Center 的停止控制 | 网页不再提供新操作；节点上已经运行的 Docker 实验继续 |
+| 停止算力代理 | Experiment Worker 的停止控制 | 停止接单和回传；已经运行的 Docker 实验不因此被强杀，恢复代理后继续管理 |
+| 真正结束某个实验 | 实验台中的实验详情 | 按该项目支持的停止/取消方式处理，结果取决于原程序的能力 |
 
-run = Run()
-torch.manual_seed(int(run.params.get('seed', 42)))
-model = torch.nn.Linear(16, 1).cuda()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-x = torch.randn(256, 16, device='cuda')
-y = x.sum(dim=1, keepdim=True)
-for step in range(1, int(run.params.get('steps', 20)) + 1):
-    optimizer.zero_grad()
-    loss = (model(x) - y).square().mean()
-    loss.backward()
-    optimizer.step()
-    run.metric(step, loss=loss.item())
-torch.save(model.state_dict(), run.output / 'model.pt')
-run.finish({'status': 'succeeded', 'loss': loss.item()})
-PY
-git add train.py
-git -c user.name=Example -c user.email=example@localhost commit -m 'Add GPU example'
-```
+关机或升级前，先等任务完成并确认待回传为零。不要把“停止代理”当成“训练容器已经全部结束”。
+Windows 睡眠、退出 Docker、注销、关闭 WSL 或关机都会影响计算条件；应用后台运行不消除这些限制。
 
-这段命令创建一个自己的 Git 仓库，将训练程序保存为 `train.py`，并记录版本。
-退出算力端终端，启动 **Configure-Project** 入口，依次填写：
+Ubuntu 算力端在安装包目录使用：
 
-| 提示 | 填什么 |
+    bash Worker-Status.sh
+    bash Client-Worker.sh logs
+    bash Stop-Worker.sh
+    bash Start-Background-Worker.sh
+
+它优先安装为当前 Linux 用户的 systemd 服务；不能使用用户服务时采用后台进程。安装器不修改系统 lingering 策略。
+长期无人登录运行需要系统自身已满足用户服务、Docker 和显卡条件。Windows 的“登录时启动”只在该 Windows 用户登录后适用。
+
+## 一个算法项目对应什么？
+
+**算法项目**保存一份代码、数据、运行方式和可复用实验参数。**实验**使用某个项目版本和一组具体参数运行一次。
+
+1. 进入**算法项目 → 导入算法**，选择原项目根目录。
+2. 检查识别入口、固定参数、实验预设、数据选择和依赖。首次扫描不运行原算法。
+3. 保存配置并查看文件预览，确认后发布。
+4. 在项目卡片分发到目标机器，等状态变为已安装。
+5. 点击创建实验，选预设；可以修改学习率、seed 等参数后提交。
+
+只改参数：创建新实验即可。改代码、数据、依赖或调用方式：重新发布一个项目版本，再分发。
+旧实验保持其提交时的版本。软件不会把你刚编辑的本地源文件偷偷换进正在训练的任务。
+
+一般无需手动编辑 JSON。需要检查调用细节时，页面的高级配置对应：
+
+| 内容 | 外部配置 |
 |---|---|
-| 项目名称 | `my-gpu-example` |
-| 仓库目录 | 你实际的 `/home/你的Linux用户名/my-gpu-example` |
-| 训练命令 | `python train.py` |
-| 数据目录 | 直接回车；本例自己生成输入 |
+| 代码、数据、额外依赖和预算 | project.json |
+| 原入口、固定参数、命令行绑定、日志规则和原生续训 | harness.json |
+| 每组实验各自的参数 | experiments/*.json |
 
-重新启动算力端，在主控网页填入 `my-gpu-example` 模板，将 `params` 设置成 `{"seed":42,"steps":20}`。
-参数组合保持 `{}`，提交一次。结束后能在详情里看到 loss 变化，并下载 `model.pt` 和 `result.json`。
-这个简短例子**没有实现检查点恢复**，不能拿它验收训练的停止恢复功能。
+这些配置保存在管理端数据目录的独立导入草稿中，原算法目录不写入 harness 文件。
+准备过程中错误会显示在导入页面；修正配置后重试。草稿扫描/打包在后台进行，不需要关闭现有实验。
+从别的电脑打开网页时使用项目 ZIP 上传；本地根目录选择仅供管理电脑自身使用。
 
-想比较两个随机种子，在参数组合框填 `{"seed":[42,43]}`。这会创建两条独立实验。
-已提交的实验定义保持不变，之后修改本地模板不会改写之前那条实验。
+完整实例：[原版 SASRec 的参数与数据如何检查](EXTERNAL-HARNESS.zh-CN.md)。
 
-## 接入自己的 SASRec 项目
+## 日志、指标与续训
 
-**先看[从改文件到跨机器运行的完整步骤](ALGORITHM-INTEGRATION.zh-CN.md)。** 当前源码可以把兼容 SASRec 的代码、数据、配置导出为一个 ZIP，传到目标节点后安装并生成当地模板。新工具不在已发布的 v0.2.0-rc.1 ZIP 中；下面保留的是该版本的手动登记流程。
+打开实验详情可以查看控制台日志和回传文件。算法原来写出的日志也可以通过外部规则读取成指标；这些规则应与日志中的实际含义一致。
+例如验证和测试输出格式相同时，不能仅凭同一个 HIT@10 文本就标成测试指标。
 
-适配器需要用户提供兼容的实现：包含 `src/experiment.py`、`datasets.py`、`models.py`、`modules.py`、`trainers.py`、`utils.py`、`main.py`，以及适配器所调用的结构化回调和检查点接口。
-它不是对所有名为 SASRec 的仓库都通用。具体接口可在源码仓库的 `expman/adapters/sasrec.py` 和部署辅助脚本 `scripts/sasrec_first_run.py` 中查看。
+默认按原程序已有能力运行：
+- 有原生续训入口：明确配置它接受的检查点和参数，验收后使用恢复功能。
+- 只保存模型权重：可以下载模型，不表示能恢复优化器、随机数状态和训练进度。
+- 没有续训：正常训练与日志回传仍可用，中止后需要重新开始。
 
-假设你的已提交 Git 仓库根目录包含 `SASRec_Original/src/…`，数据结构是：
+本例 **E:/PythonProjects/SASRec_Original** 没有完整续训入口，因此不提供恢复按钮。旧版同名函数适配器的能力不代表这份原项目也支持。
 
-```text
-datasets/
-  Video_Games/
-    Video_Games.train.txt
-    Video_Games.valid.txt
-    Video_Games.test.txt
-```
+## 资源与联网
 
-1. 用 Configure-Project 登记：项目名填 `sasrec-video`，选择这个 Git 仓库根目录，数据目录选 **datasets**，即 `Video_Games` 的上一层。
-2. 训练命令填：`python -m expman.adapters.sasrec --project /workspace/code/SASRec_Original`。
-3. 重新启动算力端，在主控网页填入它的项目模板。
-4. 将 `algorithm` 设置为 `SASRec`、`metric_protocol` 设置为 `external_sasrec_original_v1`。把**自己的科研配置**中的训练参数填入 `params`；输入/输出定位字段由适配器管理，改用 `"dataset":"Video_Games"`、`"data_asset":"sasrec-video-data-v1"`、`"device":"cuda"`、`"gpu_id":0`。
-5. 首先单独命名一条短跑任务，将 `epochs` 设为 3、`star_test` 设为 -1，使训练、验证和测试都能执行。资源预算使用实测值或保守起始值；申报预算不等于提前占用这么多显存。
-6. 检查日志、结果和资源峰值，再新建正式任务，恢复原科研参数。不要把微型 smoke 测试用的小模型尺寸带进正式实验。
+默认给节点保守预算，先建立单任务基线。多张显卡各跑一个实验，需要节点并发预算允许；单卡共享还要求每个任务允许共享、单卡并发上限和显存预算均满足。
+多卡合跑一个实验及自动选择最快分配尚未实现；不要把剩余显存当成剩余算力。
 
-源码仓库 `scripts/` 中还有源码包和数据包辅助工具，供部署维护者按需使用。
-这些工具根据用户自己的文件制作**私有传输包**；生成的算法/数据/节点包不应该上传公共 Release。
+配对地址必须从算力机可达；远程机器的 localhost 指向它自己。管理端换 IP/端口后，需要更新对应连接信息。
+若 Windows 防火墙阻止节点，可使用管理包的 **Allow-Worker-Connections.cmd**，为指定节点 IP 放行已保存的管理端端口；它需要管理员权限，不会替你改校园网或 VPN 路由。
 
-如果算法需要额外的 Python 或系统依赖，应先构建并验证相应 Docker 镜像，再登记环境。
-预置环境是 PyTorch 2.7.1、CUDA 12.8，不是通用依赖推断器。不同架构显卡需要各自在容器中验收，不能继承另一张卡的“通过”声明。
-
-## 资源分配的含义
-
-自动安装会给识别到的显卡各登记一个任务槽，同时把**整个节点的并行任务上限设为 1**，先建立清楚的单任务基线。
-这不表示程序只识别到一张卡。
-
-高级部署的设置保存在算力端数据目录下的 `node.ready.json`。修改前退出算力端，并保留备份。
-`policy.max_running` 限制整台机器；`gpu_policy[UUID].max_jobs` 限制单张卡，设成 0 表示不允许新任务使用这张卡。
-实验自己的 `resources.exclusive:true` 表示不与其他受管理任务共用该卡。CPU、RAM、显存预算也必须同时满足。
-不要为了让调度器放行，就悄悄改变科研参数。
-
-同卡共享需要参与任务都允许 `exclusive:false`，同时单卡并发上限大于 1。
-两张卡各跑一个实验，则需要节点上限至少为 2，并有足够的总 CPU/RAM。
-应当比较每条实验的完成时间与单任务基线。显存占用小，不代表两条任务并行后会更快。
-本版没有自动 DDP/FSDP 或跨机器合训。
-
-## 停止、恢复和断线
-
-在实验详情中使用 **“请求保存并停止”** 发出协作式停止请求。节点需要在线才能收到。
-具有完整检查点支持的适配器会在安全边界保存，并能以新的 attempt 恢复。普通程序如果不检查 SDK 的停止信号，就不能承诺保留完整训练状态。
-
-**“暂停接单”**用于暂停分配/启动新任务，不会杀死当前训练。
-节点失联不会把同一个任务悄悄发给另一台机器。源码、镜像、数据都已经缓存的任务，可以在主控离线期间继续执行。
-保持算力端运行，它会自动重连并补传。
-
-## 常见问题
-
-| 现象 | 处理方法 |
-|---|---|
-| 找不到 WSL 发行版 | 安装 WSL2 Ubuntu，首次打开并创建普通用户；安装要求重启 Windows 时先重启。 |
-| WSL 中 `docker: command not found` | 启动 Docker Desktop，为启动器选中的那套 Ubuntu 开启 WSL 集成。 |
-| Docker Desktop 尚未启动就报 `sailor-ingest.sock` 或 `engine.sock` 无法访问 | 属于 Docker Desktop 启动故障。[Docker 问题记录 536](https://github.com/docker/desktop-feedback/issues/536) 描述了类似情况：备份运行目录并关闭可选的 Docker AI 功能后恢复。应保留 Docker 数据；算力安装器不会重置 Docker 或删除其虚拟磁盘。 |
-| Ubuntu 中 Docker 权限不足 | 配置普通用户的 Docker 权限；用户组变更后可能需要重新登录，不要把整个算力端改为 root 运行。 |
-| 无法配对主控 | 从这台算力机打开配对文件里的主控地址，确认主控在运行、IP/端口正确、防火墙与 VPN 路由允许；主控需要 0.2 或更新版本。 |
-| 镜像下载失败/超时 | 检查 Docker 自身的网络和代理，修复后重跑入口，不要跳过摘要校验。 |
-| 显卡数量、UUID 或 CUDA 验收失败 | 查看 `setup.log`，检查驱动与 GPU 容器支持。WSL 下同时使用 Docker 选卡和 CUDA UUID 选卡；未通过的环境不会登记为可用。 |
-| 实验一直排队 | 检查节点标签、源码白名单、数据资产 ID、已验证镜像、显卡槽位与资源预算。 |
-| 程序向源码目录写文件时报错 | 将输出改为 `EXPERIMENT_OUTPUT` 或 `Run().output`；源码和数据目录只读。 |
-| 状态已完成，但文件没齐 | 保持主控、算力端运行，等待回传数量为 0，再刷新详情。 |
-| 数据目录被占用 | 检查已经运行的主控/算力端窗口，不要用同一数据目录启动第二个接单程序。 |
-
-系统前提的官方说明：[WSL 安装](https://learn.microsoft.com/windows/wsl/install)、[Docker WSL 集成](https://docs.docker.com/desktop/features/wsl/)、[Ubuntu Docker](https://docs.docker.com/engine/install/ubuntu/)、[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+主控暂时离线时，节点可继续已经分配、且代码/数据/镜像已准备好的任务。节点重连后补传记录与文件。
+节点失联不会自动导致同一个实验被重复派到另一台机器。
 
 ## 升级、备份与卸载
 
-程序目录保存可以替换的应用文件；主控/算力端数据目录保存身份、配置、数据库和结果。
+1. 暂停接单，等当前实验与回传完成。
+2. 在客户端停止旧代理/旧管理服务，再从系统托盘退出旧客户端。旧终端部署可按 Ctrl+C 退出。安装器会拒绝覆盖仍运行的同角色客户端，不进行热升级。
+3. 备份管理数据目录和算力节点数据目录。
+4. 安装同角色新版。管理端选原数据目录；Windows 算力端选原 Ubuntu。节点配置只有一份时自动复用，多份时根据节点名和路径选择原配置。
+5. 确认历史实验、节点身份和项目安装状态，再恢复接单。
 
-预览版升级前，先等待任务结束或暂停接单，并确认文件回传完成。退出程序，备份**整个数据目录**，将同角色的新版本解压到新程序目录，再启动。
-启动器使用相同的默认数据目录。算力端版本变化时会重新核验环境，确认后启用任务。
-保留旧程序和备份，直到新版本验收完成。重新配置会将安装器管理的并发策略恢复为每节点一个任务；有自定义显卡/并发策略时需要重新核对。
+不能仅更新网页就使旧算力代理具备新分发功能。项目卡片显示需更新时，更新那台机器的算力软件。
+不要同时运行同一身份的两个代理。旧版 **Update-Worker.cmd / Update-Worker.sh** 仍可用于兼容部署，日常使用新版应用入口。
 
-备份主控时先停止它，再复制整个数据目录，避免 SQLite 数据库与 WAL 文件不一致。
-备份算力端时也应在训练结束、进程退出后进行。不要用网盘双向同步正在运行的数据库或整个 WSL 虚拟磁盘。
+卸载/替换应用与删除实验数据是两件事。先确认备份，再自行决定是否清理数据；不要通过删除 Docker 虚拟磁盘解决应用升级问题。
 
-卸载程序时，先停止它，再删除解压出来的程序目录。持久数据会保留，确认不再需要实验或检查点后再自行删除。
-Docker 镜像和卷同样按需保留。本预览版没有安装自动启动服务。
-可选防火墙规则名为 `ExperimentManager-端口-算力机IP`，不再使用该节点时可在 Windows Defender 防火墙中删除对应规则。
+## 常见问题
+
+| 现象 | 下一步 |
+|---|---|
+| 节点一直准备中 | 打开算力应用日志，首次镜像下载可能耗时较长 |
+| 找不到 Ubuntu | 完成 WSL2 Ubuntu 安装并首次创建普通用户，然后在应用中选择它 |
+| WSL 找不到 docker | 启动 Docker Desktop，并为选中的 Ubuntu 启用 WSL Integration |
+| Docker 自身启动报错 | 先恢复 Docker Desktop 正常启动；不要重置或删除存储中的镜像、卷和虚拟磁盘 |
+| 缺少 Python/Git 或系统依赖 | 按算力应用显示的依赖检查处理；需要 sudo 的系统安装无法在隐藏后台中完成交互 |
+| 配对失败 | 从算力机检查配对地址、端口、防火墙及 VPN 路由 |
+| 导入参数识别不全 | 在页面补全固定参数、命令行绑定或配置模板；扫描器不执行原程序来猜测动态值 |
+| 新项目依赖报错 | 在导入配置填写正确模块名和确切的包版本，再重新发布 |
+| 实验排队 | 查看节点在线状态、项目安装结果和资源预算 |
+| 任务已完成，文件还没齐 | 等待回传为零，再刷新实验详情 |
+| 提示已有旧代理运行 | 先停止旧启动入口，使用原配置接管；不要新建另一份节点身份绕过它 |

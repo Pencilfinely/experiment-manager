@@ -4,9 +4,21 @@
 
 You already have an algorithm that trains. The manager needs to know **which entry to run, which parameters to pass, where the data is, and where outputs belong**. An external harness records these details outside the algorithm directory and calls the original entry. Your model and training loop do not need SDK calls.
 
-**The v0.2.0-rc.2 controller and worker packages include this workflow. Older v0.2.0-rc.1 ZIPs do not include project distribution.** Update both controller and workers. Workers must advertise `project-bundle-v1`; updating the browser alone does not give an old agent package-download or installation support.
+**0.3.0-rc.1 integrates import into the controller page.** Ordinary use does not require a separate import terminal, copying administrator credentials or switching between several files. Use matching new controller and worker versions; refreshing a browser does not upgrade an old agent. Existing deployments can retain their configuration using the [operations guide](OPERATIONS.md).
 
-For an existing worker, wait until current tasks and uploads finish, then press **Ctrl+C** in the old agent console while leaving Docker running. Extract the new worker ZIP into a new permanent directory. Run **`Update-Worker.cmd`** on Windows or **`bash Update-Worker.sh`** on Ubuntu. It discovers the existing configuration. If several candidates appear, use the menu's node names and full paths to select the old command's `--config` file. Identity, images, policies and records are reused; no WSL/Docker reinstall, re-pairing or manual configuration editing is required. Use this new package's update entry for future starts of the existing node.
+## Complete the workflow in the page first
+
+1. On the controller computer, open **Experiment Center → Algorithm Projects → Import algorithm**.
+2. Choose the original root folder. Do not copy out only a main.py file: preserve the project's module and dataset relationships.
+3. Wait for static discovery and inspect entry candidates. The example below uses **src/main.py** with working directory **src**. Discovery does not launch training.
+4. Review fixed parameters, experiment presets, datasets, dependencies and resource budgets in the same page. Each preset is a separate experiment configuration; duplicate a formal preset to make a short test.
+5. Save and inspect the file preview. Dataset include patterns decide which files enter the package; deselect unnecessary files.
+6. Confirm publication, then select workers and deploy from the project card. The software handles transfer, verification, recipient configuration and environment preparation.
+7. Wait for successful installation, choose Create experiment, run the short test and then submit the formal preset.
+
+The tables below explain the page's fields. JSON and command-line examples are advanced references, **not a sequence of mandatory manual steps**.
+Page imports store independent drafts under the controller data directory's `imports` folder. Discovery and configuration do not modify the original project.
+A remote browser cannot choose folders on the controller computer; upload a prepared project ZIP remotely.
 
 ## Identify the actual SASRec project
 
@@ -27,9 +39,9 @@ It runs `python main.py` from `src` and accepts `argparse` options such as `--da
 
 Earlier documentation targeted **`E:\PythonProjects\IntentPreference\SASRec_Original`**, which has `load_run_config()`, `run_all()` and a dedicated recovery protocol. That [legacy adapter lesson](SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md) does not describe this project.
 
-## Step 1: Generate configuration outside the source
+## Where configuration lives; optional command-line entry
 
-A v0.2.0-rc.2 Windows controller package provides **`Import-Algorithm.cmd`** in its extraction directory; Ubuntu uses `bash Import-Algorithm.sh`. This user's local deployment also has **`local-app/04-Import-Algorithm.cmd`**, a personal entry not included in public source. The Windows launcher opens the import wizard; source users can run it directly:
+The page generates and edits external configuration for you. For scripts or legacy deployments, Windows packages retain **`Import-Algorithm.cmd`** and Ubuntu uses `bash Import-Algorithm.sh`. Source users can also run:
 
 ```powershell
 python -m expman.harness_project wizard
@@ -49,13 +61,13 @@ python -m expman.harness_project prepare --source "E:\PythonProjects\SASRec_Orig
 | `harness.json` | Original entry, parameter bindings, fixed paths, log parsing and native-resume capability | Initial setup; entry/interface changes |
 | `experiments/*.json` | Separate learning-rate, seed, epoch and other experiment presets | New experiments or reusable parameter presets |
 
-Initial preparation creates `experiments/default.json` plus a `discovery.json` report explaining the inferred settings. Review these files, change `"reviewed": false` to `true` in `project.json`, and run the same launcher with the same directory again to build. Enter the controller data directory `E:\ExperimentCenter` and its URL to upload, or leave the controller directory blank to produce only a ZIP. The commands below expose the individual wizard stages; you need not type each one during ordinary use.
+Initial preparation creates `experiments/default.json` plus a `discovery.json` report explaining the inferred settings. **In the page, review and confirm publication directly**; there is no need to edit `reviewed`. Only the standalone command-line workflow requires editing external files, setting `"reviewed": true` in `project.json` and running the build/upload commands.
 
 Discovery reads Python syntax trees. It does not import the project or run `main.py --help`. This SASRec calls `main()` directly at module scope, so importing it could accidentally begin training.
 
 The result is a **draft to review**. Preparing it starts no training and does not treat every inferred value as verified.
 
-## Step 2: Review the discovered values
+## Review discovered values: SASRec example
 
 This SASRec exposes 24 statically readable arguments. Review the following values rather than writing a Python adapter:
 
@@ -111,11 +123,11 @@ This example retains the worker's existing PyTorch/NumPy environment and adds th
 
 A native Windows `.bat` entry cannot run directly in a Linux container; select its corresponding Python/bash entry when available.
 
-## Step 3: Separate short and formal experiment presets
+## Separate short and formal experiment presets
 
-The generated `experiments/default.json` contains the discovered defaults and can serve as the formal preset. If renaming it, update both the filename and its `id`; each preset ID must be unique.
+The page's default preset contains the discovered defaults and can serve as the formal preset. Add or duplicate a preset for the short test, give it a distinct name and change `epochs` and `star_test`. Each preset ID must be unique.
 
-Create `short.json` in the same directory with this complete content:
+The equivalent external `experiments/short.json` is shown below; page users do not need to create this file manually:
 
 ```json
 {
@@ -132,9 +144,11 @@ Create `short.json` in the same directory with this complete content:
 
 Do not omit `star_test`: the original code saves a checkpoint only once validation begins and loads that checkpoint at the end. Changing 300 epochs to 3 while keeping `star_test=100` can leave no checkpoint to load. This constraint was established by reading this implementation; static discovery cannot guess equivalent training constraints for every algorithm.
 
-## Step 4: Upload once, then select recipient workers
+## Publish once, then select recipient workers
 
-Build the package:
+**Page workflow: save configuration → inspect the file preview → confirm publication.** The project is now in the library. Select workers and deploy; there is no separate ZIP upload step.
+
+For the standalone command-line/remote ZIP workflow, build manually:
 
 ```powershell
 python -m expman.harness_project build --project "E:\ExperimentProjects\SASRec" --output "E:\ExperimentPackages\sasrec.zip"
@@ -142,7 +156,7 @@ python -m expman.harness_project build --project "E:\ExperimentProjects\SASRec" 
 
 The ZIP contains selected source, data, external configuration and experiment presets. Review its file list before sending it to workers.
 
-In **“算法项目 / Projects”**, click **“上传项目包 / Upload project”** and choose the ZIP. Alternatively, on the **control computer**, upload using the existing controller configuration:
+For a separately generated ZIP, open **“算法项目 / Projects”**, click **“上传项目包 / Upload project”** and choose it. Command-line users can also upload from the **control computer** using its existing configuration:
 
 ```powershell
 python -m expman.harness_project publish --bundle "E:\ExperimentPackages\sasrec.zip" --hub "http://127.0.0.1:8765" --center-root "E:\ExperimentCenter"
@@ -152,7 +166,7 @@ After upload, check the recipient nodes under the project and click **“分发�
 
 You do not need to repeat Xftp transfers or log into each machine to edit paths. Offline nodes need to reconnect. If a runtime lacks dependencies or is incompatible, fix that environment and retry; receiving a package is not proof that training succeeds.
 
-## Step 5: Submit a short test, then the formal experiment
+## Submit a short test, then the formal experiment
 
 1. Confirm that the target worker reports the project installed.
 2. Click **“创建实验 / New experiment”**. Under **“节点与实验配置 / Worker and preset”**, choose the target worker's `Video_Games - 3 epoch check`. Review **“本次实验参数 / Parameters”**, then click **“提交实验 / Submit experiment”**.
@@ -183,7 +197,7 @@ Original source remains unchanged. Relative writes occur in the task's working c
 
 ## Repeat for another algorithm
 
-Select its source directory, generate a separate external configuration, and review **entry, arguments, data, dependencies and logs**. Then build, upload and deploy. If the original entry accepts JSON/YAML, have the harness generate that supported configuration format and pass it through the existing `--config` option; no replacement training API is needed.
+Select its original root folder in Algorithm Projects and review **entry, arguments, data, dependencies and logs**. Save, publish and deploy; the page workflow generates the external configuration and bundle. If the original entry accepts JSON/YAML, have the harness generate that supported configuration format and pass it through the existing `--config` option; no replacement training API is needed.
 
 Review the generated draft once. Later experiments with the same interface only need different parameter presets. Code, data or invocation changes produce a new immutable package version; earlier experiments retain their original version reference.
 

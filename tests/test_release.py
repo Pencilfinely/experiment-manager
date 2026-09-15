@@ -20,7 +20,7 @@ from expman.pairing import validate_pairing
 from expman.project_setup import register
 from expman.worker_setup import WorkerSetup, load_pairing
 from expman.worker_setup import start as start_worker
-from scripts import build_release
+from scripts import build_desktop, build_release
 from tests.support import temporary_directory
 
 GPU = {'uuid': 'GPU-11111111-1111-1111-1111-111111111111', 'name': 'Example NVIDIA GPU', 'total_mb': 8192, 'free_mb': 7000}
@@ -229,6 +229,48 @@ class WorkerSetupTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), before)
 
 
+class NativeDesktopBuildTests(unittest.TestCase):
+    def test_native_compilation_embeds_role_and_optional_payload_without_a_shell(self):
+        with temporary_directory() as path:
+            root = Path(path)
+            compiler = root / 'csc.exe'
+            compiler.write_bytes(b'fixture compiler')
+            payload = root / 'payload.zip'
+            payload.write_bytes(b'fixture zip')
+            captured = []
+            def run(argv, **kwargs):
+                captured.append(argv)
+                self.assertNotIn('shell', kwargs)
+                resource = next(value for value in argv if value.startswith('/resource:') and value.endswith(',Role'))
+                self.assertEqual(Path(resource[len('/resource:'):-len(',Role')]).read_text(encoding='utf-8'), 'worker')
+                self.assertIn('/resource:' + str(payload) + ',AppPayload', argv)
+                target = Path(next(value[len('/out:'):] for value in argv if value.startswith('/out:')))
+                target.write_bytes(b'MZcompiled-test-fixture')
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            with patch.object(build_desktop.subprocess, 'run', side_effect=run):
+                target = build_desktop.compile_desktop(root / 'Worker Setup.exe', 'worker', payload, compiler)
+            self.assertEqual(target.read_bytes(), b'MZcompiled-test-fixture')
+            self.assertIn('/target:winexe', captured[0])
+            self.assertIn('/platform:x64', captured[0])
+            self.assertFalse(list(root.glob('.desktop-build-*')))
+            with self.assertRaises(FileExistsError):
+                build_desktop.compile_desktop(target, 'worker', compiler=compiler)
+
+    def test_compiler_failure_does_not_produce_a_placeholder_executable(self):
+        with temporary_directory() as path:
+            root = Path(path)
+            compiler = root / 'csc.exe'
+            compiler.write_bytes(b'fixture compiler')
+            target = root / 'Center.exe'
+            with patch.object(build_desktop.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'syntax problem')):
+                with self.assertRaisesRegex(RuntimeError, 'syntax problem'):
+                    build_desktop.compile_desktop(target, 'controller', compiler=compiler)
+            self.assertFalse(target.exists())
+            self.assertFalse(list(root.glob('.desktop-build-*')))
+            with self.assertRaisesRegex(RuntimeError, 'does not exist'):
+                build_desktop.find_compiler(root / 'missing-compiler.exe')
+
+
 class ReleaseArchiveTests(unittest.TestCase):
     def test_public_inputs_exclude_runtime_and_private_documents(self):
         files = build_release.application_files()
@@ -246,7 +288,7 @@ class ReleaseArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'hash'):
                 build_release.python_runtime(archive)
 
-    def test_three_assets_have_role_specific_entries_manifests_and_licenses(self):
+    def test_zip_and_installer_assets_have_role_specific_entries_manifests_and_licenses(self):
         with temporary_directory() as path:
             root = Path(path)
             runtime = root / 'runtime.zip'
@@ -254,7 +296,16 @@ class ReleaseArchiveTests(unittest.TestCase):
                 archive.writestr('python.exe', b'fixture')
                 archive.writestr('LICENSE.txt', b'fixture license')
                 archive.writestr('python313._pth', b'original')
-            with patch.object(build_release, 'PYTHON_SHA256', hashlib.sha256(runtime.read_bytes()).hexdigest()):
+            calls = []
+            def compile_native(output, role, payload=None, compiler=None):
+                calls.append((role, payload))
+                target = Path(output)
+                target.write_bytes(b'MZfixture-' + role.encode() +
+                                   (hashlib.sha256(Path(payload).read_bytes()).digest() if payload else b''))
+                return target
+            with patch.object(build_release, 'PYTHON_SHA256', hashlib.sha256(runtime.read_bytes()).hexdigest()), \
+                 patch.object(build_release, 'find_compiler', return_value=root / 'fake-csc.exe'), \
+                 patch.object(build_release, 'compile_desktop', side_effect=compile_native):
                 build_release.build(root / 'dist', runtime)
             archives = list((root / 'dist').glob('*.zip'))
             self.assertEqual(len(archives), 3)
@@ -268,16 +319,48 @@ class ReleaseArchiveTests(unittest.TestCase):
                         self.assertEqual({'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}, expected)
                     self.assertIn('LICENSE', names)
                     if 'controller' in path.name:
+                        self.assertIn('ExperimentCenter.exe', names)
+                        self.assertIn(b'Entry point: ExperimentCenter.exe', archive.read('START-HERE.txt'))
                         self.assertIn('runtime/LICENSE.txt', names)
                         self.assertIn('Start-Controller.cmd', names)
                         self.assertNotIn('Start-Worker.cmd', names)
                         self.assertIn(b'..\n', archive.read('runtime/python313._pth'))
                     elif 'windows' in path.name:
+                        self.assertIn('ExperimentWorker.exe', names)
+                        self.assertIn('Client-Worker.sh', names)
+                        self.assertIn(b'Entry point: ExperimentWorker.exe', archive.read('START-HERE.txt'))
                         self.assertIn('Start-Worker.cmd', names)
                         self.assertNotIn('runtime/python.exe', names)
                     else:
+                        self.assertIn('Install-Worker.sh', names)
+                        self.assertIn('Stop-Worker.sh', names)
+                        self.assertIn('Worker-Status.sh', names)
+                        self.assertIn(b'Entry point: Install-Worker.sh', archive.read('START-HERE.txt'))
                         self.assertIn('Start-Worker.sh', names)
                         self.assertFalse(any(name.endswith('.cmd') for name in names))
+            installers = list((root / 'dist').glob('*-Setup.exe'))
+            self.assertEqual(len(installers), 2)
+            self.assertEqual([role for role, payload in calls if payload], ['controller', 'worker'])
+            for role, payload in calls:
+                if payload:
+                    self.assertTrue(Path(payload).is_file())
+            sums = (root / 'dist/SHA256SUMS.txt').read_text(encoding='utf-8').splitlines()
+            self.assertEqual(len(sums), 5)
+            for row in sums:
+                digest, name = row.split('  ', 1)
+                self.assertEqual(digest, hashlib.sha256((root / 'dist' / name).read_bytes()).hexdigest())
+            info = json.loads((root / 'dist/build-info.json').read_text(encoding='utf-8'))
+            self.assertEqual(info['artifact_count'], 5)
+            self.assertFalse(info['windows_code_signed'])
+
+    def test_release_fails_before_assets_when_native_compiler_unavailable(self):
+        with temporary_directory() as path:
+            output = Path(path) / 'dist'
+            with patch.object(build_release, 'python_runtime', return_value={}), \
+                 patch.object(build_release, 'find_compiler', side_effect=RuntimeError('native compiler unavailable')):
+                with self.assertRaisesRegex(RuntimeError, 'native compiler unavailable'):
+                    build_release.build(output, 'unused-runtime.zip')
+            self.assertEqual(list(output.iterdir()), [])
 
 
 if __name__ == '__main__':

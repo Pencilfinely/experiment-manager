@@ -2,263 +2,109 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-Run GPU experiments on your computers and follow them from one browser. Keep the
-code version, environment, parameters, logs, metrics and checkpoints together.
+Manage GPU experiments, computers and algorithm projects in one application window.
+Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Release: 0.2.0-rc.2 — a preview release.** The controller and worker are separate
-applications. The controller does not train models. Install both editions on a
-Windows computer if it should manage experiments and also contribute its GPU.
+**0.3.0-rc.1 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+This version adds Windows installers, application shortcuts and background operation. Signed MSI packages, automatic updates and unattended operating-system setup are not included.
 
-## Download the right edition
+## Download and install
 
-Get the ZIP assets from [Releases](https://github.com/Pencilfinely/experiment-manager/releases).
-Download the named application ZIPs, rather than GitHub's automatically generated
-“Source code” archives. Extract the whole ZIP before starting it.
+Get application installers or complete ZIPs from [GitHub Releases](https://github.com/Pencilfinely/experiment-manager/releases). GitHub's automatically generated Source code archives are not installers.
 
-| ZIP suffix | Install on | Start here | Prerequisites |
+| Computer | Recommended asset suffix | Application | Prerequisites |
 |---|---|---|---|
-| `windows-controller-x64` | Your Windows 11 control computer | Double-click `Start-Controller.cmd` | A browser; Python is included. No WSL or Docker needed. |
-| `windows-worker-x64` | A Windows 11 NVIDIA GPU computer | Double-click `Start-Worker.cmd` | WSL2 with Ubuntu 22.04+, Docker Desktop with WSL integration, NVIDIA Windows driver |
-| `ubuntu-worker-x64` | A native Ubuntu 22.04+ NVIDIA GPU computer/server | Run `bash Start-Worker.sh` | Docker Engine, NVIDIA Linux driver and NVIDIA Container Toolkit; your normal user must be able to run Docker |
+| Windows 11 controller | windows-controller-x64-Setup.exe | **Experiment Center**, ExperimentCenter.exe | Microsoft Edge; no WSL, Docker or separate Python installation |
+| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **Experiment Worker**, ExperimentWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop with integration enabled for that Ubuntu, NVIDIA Windows driver |
+| Native Ubuntu 22.04+ NVIDIA server | ubuntu-worker-x64.zip | Background worker after installation | Docker Engine, NVIDIA Linux driver and NVIDIA Container Toolkit; normal-user access to Docker |
 
-All three assets belong to the same release and use the same software version.
-The current builds target x86-64. ARM and AMD/Intel GPU execution are not supported.
-The Ubuntu asset is a worker, not a combined controller/worker installer.
+Windows installers install for the current user without administrator privileges. Firewall or system dependency changes may still require elevation.
+Portable Windows ZIPs provide the same .exe applications: extract the whole archive before opening them. Current builds target x86-64 and NVIDIA GPUs.
+First worker setup downloads large images; allow at least 8 GiB plus space for code, datasets and experiment outputs.
 
-Workers use Python 3.10+ and Git in Ubuntu; the launcher installs missing Python/Git
-packages through `apt` and may ask for your normal `sudo` password. It does not
-install or replace GPU drivers, WSL or Docker. Allow roughly 8 GiB of free disk
-space for first setup, plus space for your code, datasets and experiment outputs.
+## First use: three steps
 
-## What happens where?
+### 1. Open Experiment Center
 
-```text
-Control computer                         GPU computer
-Browser → Controller ── private network ── Worker → Docker → Your training program
-           ↑                                  │
-           └──────── logs, metrics, files ──────┘
-```
+Start **Experiment Center**. Its sidebar contains Overview, Experiments, Compute, Algorithm Projects and Settings.
+The controller service runs in the background; closing the page window does not stop it. Reopen it through the application or tray.
+Local application launch signs you in automatically. You do not need to copy an administrator token or keep a terminal open.
 
-The **controller** keeps the experiment list, assigns work and receives results.
-The **worker** checks what its machine can run, prepares inputs and launches the
-training container. Docker provides the experiment's Linux/Python environment;
-its Ubuntu version need not match the host's Ubuntu version.
+The controller keeps data separately from application files. For an existing deployment, select its original data directory, such as **E:/ExperimentCenter**, to retain experiment history.
+Do not use the replaceable application directory as your data directory.
 
-The computers must already be able to reach each other through a LAN or a trusted
-private network such as your VPN. Being on the same campus is not sufficient by
-itself. A worker initiates connections to the controller; no inbound worker port
-is needed. The software discovers possible controller addresses but cannot make
-an unreachable network routable.
+### 2. Connect a worker
 
-## First setup, step by step
+In **Compute**, add a computer, give it a unique name and select a controller address **that the worker can reach**. Download its pairing file.
+Copy the worker installer/package and **NAME.pairing.json** to that computer.
 
-### 1. Start the controller
+- **Windows:** install and open Experiment Worker, choose the pairing file and Ubuntu distribution, then start setup. The application checks prerequisites, verifies GPUs, creates configuration and accepts work in the background. Progress and logs stay available in its window.
+- **Ubuntu:** extract the worker ZIP and run this command as your normal user from that directory, replacing the pairing-file path:
 
-1. On the Windows control computer, extract the controller ZIP into a permanent
-   folder, for example `C:\Apps\ExperimentManager-Controller`.
-2. Double-click **`Start-Controller.cmd`**. It creates its own data directory and
-   opens the experiment page with a local browser login already applied.
-3. Keep its console window running. The browser may be closed and reopened;
-   closing the controller console stops the service.
+    bash Install-Worker.sh --pairing /path/to/node.pairing.json
 
-By default the data lives in `%LOCALAPPDATA%\ExperimentManager\controller`, outside
-the application folder. The first available port between 8765 and 8784 is selected
-on first launch and saved. Later launches keep it. Reopening the same installation
-opens its existing controller instead of starting a duplicate.
+The command returns while first setup continues in the background. Check progress with **bash Worker-Status.sh**; view logs with **bash Client-Worker.sh logs**.
+After setup, the computer appears online in the controller. Subsequent starts reuse its identity and configuration.
 
-### 2. Give each worker a pairing file
+A pairing file is one worker's credential and never contains the administrator token. Use a distinct identity for each computer; reuse the original identity when reinstalling that same computer.
+Computers must already be reachable over a LAN or trusted private network. Do not use localhost for a remote worker. Sharing a campus network does not guarantee reachability.
+Workers initiate connections to the controller and need no inbound worker port.
 
-1. In the controller page click **“添加算力机 / Add worker”**.
-2. Enter a unique name, such as `gpu-desktop` or `ubuntu-server`.
-3. Choose or enter the controller URL **as reached from that worker**, including
-   the port. Use the controller's LAN/private-VPN address. `localhost` on another
-   machine points at that other machine. Windows and WSL also have distinct
-   networking, so use a reachable Windows address when managing your own WSL GPU.
-4. Click **“下载配对文件 / Download pairing file”**. Copy this small
-   `NAME.pairing.json` file to the target worker.
+### 3. Import and run an algorithm in the same window
 
-The pairing file is that worker's credential. Each computer gets a different
-worker name and file. Re-exporting an existing name preserves its identity for
-reinstallation; do not give the same identity to two computers. The administrator
-credential is never included in a worker's pairing file.
+1. Open **Algorithm Projects → Import algorithm** and choose the original root folder. Select the discovered main.py or other supported original entry.
+2. Review fixed parameters, separate experiment presets, datasets, extra dependencies and resource budgets in the page. Add or edit presets without opening several JSON files.
+3. Review the selected-file preview and **publish to the project library**. This records a fixed version of the code, data and configuration; it does not start training.
+4. Select online workers on the project card and **deploy**. Workers automatically prepare code, data and the Docker environment. Wait for installation to succeed.
+5. Choose **Create experiment**, select a preset and edit parameters. Submit a short test first, then follow progress, logs, metrics and result files in **Experiments**.
 
-If Windows blocks a remote worker, run **`Allow-Worker-Connections.cmd`** in the
-controller folder, enter that worker's IPv4 address and accept the Windows
-administrator prompt. The helper allows only that source IP to the saved
-controller TCP port. It does not change routers or VPN routes. If your campus or
-VPN policies block the connection, that network policy must be resolved first.
-An explicit Windows firewall **Block** rule overrides an Allow rule. If you
-previously denied this controller's Windows network prompt, review its bundled
-`runtime\python.exe` entry under Windows Defender Firewall → Advanced settings →
-Inbound Rules. The helper reports such a block and leaves it for you to review.
+Local-folder import is available in the application on the controller computer. A remote browser can upload a prepared project ZIP; it cannot browse the controller's filesystem.
 
-### 3. Start the worker
+**The original algorithm is not rewritten.** The external harness calls its original entry in an isolated working copy, passes configuration and collects outputs.
+Native resume can be configured when the original entry supports it. Otherwise resume stays unavailable; a saved model alone is not advertised as full training recovery.
+Discovery is a draft: dynamic arguments, dependency versions and log meanings need review. Windows .bat entries do not run directly in Linux GPU containers; choose the Python/bash entry they actually invoke.
 
-**Windows worker**
+For a concrete example, see [Review an unchanged SASRec_Original import](docs/EXTERNAL-HARNESS.md). It uses **E:/PythonProjects/SASRec_Original/src/main.py** and one **Video_Games.test.txt** file, not the different implementation containing experiment.py.
 
-1. Start Docker Desktop. Under **Settings → Resources → WSL Integration**, enable
-   the Ubuntu distribution you will use.
-2. Extract the worker ZIP into a permanent local folder. Put its one
-   `NAME.pairing.json` file next to `Start-Worker.cmd`.
-3. Double-click **`Start-Worker.cmd`**. If there are several WSL distributions,
-   choose one once; the selection is remembered.
+## Distribution, outputs and background operation
 
-**Native Ubuntu worker**
+Publish a project once and let selected workers receive it. Current distribution sends **immutable code/data snapshots through the controller**, with private Git snapshots and Docker environments prepared on each worker. Routine use requires no node-side Git or Docker commands.
+**Direct GitHub/GitLab account integration and third-party registry publishing controls are not implemented.** Publish another version when source or data changes; create another experiment when only learning rate, seed or similar parameters change.
 
-1. Extract the Ubuntu worker ZIP and put its pairing file beside `Start-Worker.sh`.
-2. Open a terminal in that directory, or connect over SSH and `cd` into it.
-3. Run **`bash Start-Worker.sh`**, as your normal Linux user, not root.
+Each experiment has its own configuration and output directory. Console output is saved, existing log files can be configured as metric sources, and models/results return with the experiment.
+Task completion and file upload completion may occur at different times. Check pending uploads before shutting down.
 
-Both workers then automatically:
+The Windows worker can continue after its window closes, but still depends on the current user's WSL and Docker Desktop.
+**Background operation does not mean training continues through sleep, logout or power-off.** Optional login startup is not a Windows service running without user login.
+Native Ubuntu prefers user-level systemd when available and otherwise uses a detached process. Startup before login or persistence after logout depends on the machine's existing user-service/lingering settings; the installer does not silently change those system policies.
 
-1. Authenticate to the controller and check local Docker, NVIDIA GPUs and disk.
-2. Prepare a private, versioned application copy and a small Git snapshot.
-3. Build the runtime from a fixed PyTorch/CUDA image and record its immutable
-   digest in a local registry bound to `127.0.0.1:5001`.
-4. Run a real CUDA calculation on each enabled GPU, checking the GPU UUID inside
-   the restricted training container.
-5. Generate the node settings, conservative resource budgets and a GPU-check
-   task template, then start accepting work.
-
-First setup downloads a large image and can take several minutes. A failed step
-prints the reason and log location. Run the same launcher again after fixing it;
-completed image preparation is reused. Normal subsequent starts reuse the saved
-configuration and reconnect, including after temporary controller outages.
-
-Worker data lives in `~/.local/share/experiment-manager/worker` **inside Ubuntu**.
-No manual node JSON editing is required for initial pairing and runtime setup.
-Keep Docker and the worker console running while using the node.
-
-### 4. Verify the whole path from the browser
-
-1. Wait for the worker to appear online under **计算节点**.
-2. Click its **“填入任务 / Use: GPU-check-…”** button.
-3. Review the filled task and click **“提交到队列”** once. The parameter grid `{}`
-   means one experiment.
-4. Open the resulting experiment. It should become **已完成 / succeeded**.
-5. Check that `result.json` is downloadable and contains `"status": "passed"`.
-   Wait until the worker's pending upload count reaches zero.
-
-This proves browser submission, assignment, a real GPU container and result
-return work together. It is a deployment check, not a model-quality benchmark.
-
-## Upgrade a worker that already runs experiments
-
-Use **`Update-Worker.cmd`** on Windows or **`bash Update-Worker.sh`** on Ubuntu
-from the new worker package. You do not need to reinstall WSL/Docker, pair the
-node again, or edit its configuration manually.
-
-1. Wait until current experiments finish and pending uploads reach zero. Press
-   **Ctrl+C** in the old agent console, leaving Docker running.
-2. Extract the complete **v0.2.0-rc.2 worker ZIP** into a new permanent directory
-   and run its update entry.
-3. On Windows, use the original Ubuntu distribution. The updater discovers saved
-   node configurations. When several exist, its menu shows node names and full
-   paths; select the one used by the old startup command's `--config` option.
-4. Wait for the node to reconnect without “需更新算力代理” in the project area.
-   It can then receive packages. Use the same new package's update entry for
-   future starts; the original identity, policies, images and experiment records are reused.
-
-## Run your own experiments
-
-**Use an external harness: keep the algorithm's original `main.py` or startup
-script and describe how to run it in a separate configuration directory.**
-Follow [Connect an unchanged algorithm and distribute it from the controller](docs/EXTERNAL-HARNESS.md).
-**v0.2.0-rc.2 includes this workflow; the older v0.2.0-rc.1 ZIPs do not.**
-Use the new version on both controller and workers. Existing workers keep their
-configuration through the update entry described above.
-
-1. Run the import wizard and select the original source directory and entry. It
-   reads arguments statically and writes an external configuration draft; it does
-   not execute `--help` or write into the research project.
-2. Review `project.json` for source, data, runtime and resource budgets;
-   `harness.json` for invocation, fixed paths and log parsing; and
-   `experiments/*.json` for separate experiment parameter presets.
-3. Build and upload the project package. In the controller's Projects area,
-   select workers and deploy. Once installation succeeds, submit a short test
-   using the corresponding experiment preset.
-4. Change seeds or learning rates in the browser for subsequent experiments.
-   Publish a new package version when code, data or invocation configuration changes.
-
-Workers download and verify the package, prepare their own private source snapshot
-and data, and launch the original entry in a separate working copy. Console output
-and generated files belong to that experiment. You do not need to repeat adapter
-edits on every computer, initialize Git in the original project, or enter another
-computer's dataset paths manually.
-
-The SASRec example now refers specifically to **`E:\PythonProjects\SASRec_Original`**:
-entry `src/main.py`, a single `Video_Games.test.txt` dataset file, and dependencies
-including PyTorch, NumPy, SciPy and tqdm. This implementation lacks a complete
-training-resume entry, so resume is disabled while normal experiment execution remains available.
-
-Discovery produces a draft. Review dynamic arguments, dependency versions, data
-selection and metric meanings. The harness uses capabilities already exposed by
-the original entry; it does not invent native resume or multi-GPU training.
-
-The previous [SDK integration guide](docs/ALGORITHM-INTEGRATION.md) and
-[SASRec function-adapter lesson (Chinese)](docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md)
-remain developer references. The latter targets the **different implementation at
-`E:\PythonProjects\IntentPreference\SASRec_Original`**, using `load_run_config()` and
-`run_all()`. It does **not** describe the original project above and is no longer
-the recommended integration route. Application downloads do not include users'
-algorithms or research datasets.
-
-## GPU scheduling: current capabilities
+## Scheduling capabilities
 
 | Mode | Current support |
 |---|---|
-| One experiment on one GPU | Supported; the default setup uses one running task per node |
-| Several independent experiments on separate GPUs | Supported after increasing node concurrency and meeting resource budgets |
-| Several independent experiments on one GPU | Supported when tasks allow sharing, the GPU job limit allows it, and budgets fit |
+| One experiment on one GPU | Supported; setup defaults to conservative concurrency |
+| Separate experiments on separate GPUs | Supported when node concurrency and resource budgets allow |
+| Several independent experiments on one GPU | Supported when tasks allow sharing, the GPU job limit allows it and budgets fit |
 | One experiment across multiple GPUs or machines | Not implemented; requires algorithm and scheduler support |
-| Automatically choose the fastest allocation from measured performance | Not implemented |
+| Automatically measure and choose the fastest allocation | Not implemented |
 
-Each experiment gets a selected physical GPU UUID and sees its own logical
-`cuda:0`. This matters on WSL, where Docker's GPU selection alone may still expose
-multiple devices. Process-level selection is not a hardware security boundary.
-Free VRAM is not proof of free compute. The default prioritizes predictable
-single-task execution; sharing should be justified by measured completion times.
-The manager does not silently change batch size, precision or learning rate.
+Free VRAM is not proof of free compute. The manager does not silently change batch size, precision or learning rate to make a task fit.
+Workers can continue already assigned, cached tasks during a temporary controller outage and return records after reconnecting. An offline task is not silently duplicated onto another machine.
 
-## Reliability and limits
+## Existing deployments and everyday use
 
-- A worker can continue already assigned **and cached** tasks while the controller
-  is offline, then send pending records and files after reconnecting. Unprepared
-  jobs may still need Git/image access. New jobs cannot be submitted to an offline
-  controller.
-- Resume is enabled only when the original program already supports it and its
-  resume entry is explicitly configured. Projects without resume can still train;
-  an interrupted run must start again. The old specific SASRec adapter's resume
-  support does not apply to every project named SASRec.
-- A completed task's files can still be uploading. Check both task status and
-  pending uploads before shutting machines down.
-- This preview uses foreground launchers, not installed system services. Windows
-  sleep, logout, reboot or stopping Docker can interrupt compute. It does not
-  include MSI signing, unattended OS installation or automatic updates.
-- Use localhost or a trusted private network. Do not expose the controller
-  directly to the public Internet; it uses bearer credentials and is not a
-  multi-tenant public service.
+Before upgrading, finish tasks and pending uploads, stop the old controller/agent in its client, exit that client from its tray and install the new package for the same role. The installer asks you to exit an already running same-role client; it does not hot-replace a running installation. Select the original controller data directory, Ubuntu distribution and node configuration to retain identity and history.
+Never run old and new agents against the same node directory at once. See [Everyday operations](docs/OPERATIONS.md) for upgrading, backups, background controls and troubleshooting.
+Use this preview on localhost or a trusted private network; it is not a public multi-tenant service.
 
-## For developers
+## Development and license
 
-The Python application uses the standard library. A source checkout needs
-Python 3.10+; PyTorch/NumPy are required only where actual SASRec/CUDA work runs.
+Controller logic uses Python's standard library; a source checkout needs Python 3.10+.
+Release builds select explicit application files. Credentials, user algorithms and research datasets are excluded from public packages.
 
-```bash
-python -m unittest discover -s tests -t . -v
-python scripts/build_release.py --download-python
-```
+    python -m unittest discover -s tests -t . -v
+    python scripts/build_release.py --download-python
 
-The release builder uses an explicit file allowlist, validates the official
-embedded Python SHA256, produces per-file manifests and writes `SHA256SUMS.txt`.
-Runtime data, pairing files, private deployment notes, external algorithms and
-datasets are excluded. Native GPU tests remain a separate hardware acceptance
-step; unit tests alone do not certify a GPU model.
+[Protocol](CONTRACT.md) · [Issues](https://github.com/Pencilfinely/experiment-manager/issues) · [Legacy SDK reference for developers](docs/ALGORITHM-INTEGRATION.md).
 
-Protocol reference: [CONTRACT.md](CONTRACT.md). Known issues and requests:
-[GitHub Issues](https://github.com/Pencilfinely/experiment-manager/issues).
-
-## License
-
-MIT — see [LICENSE](LICENSE). Bundled CPython and separately installed/downloaded
-components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).
+MIT — see [LICENSE](LICENSE). CPython and separately downloaded components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

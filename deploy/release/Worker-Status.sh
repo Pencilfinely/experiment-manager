@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+package_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$package_dir"
+exec python3 -m expman.worker_service status "$@"

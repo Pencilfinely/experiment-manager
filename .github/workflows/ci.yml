@@ -24,12 +24,21 @@ jobs:
       - run: python -m unittest discover -s tests -t . -v
       - run: python -m compileall -q expman scripts
       - run: node --check expman/static/app.js
+      - name: Native Windows desktop transport and role tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_desktop.ps1
       - if: runner.os == 'Linux'
         run: |
           bash -n deploy/release/Start-Worker.sh
           bash -n deploy/release/Configure-Project.sh
           bash -n deploy/release/Import-Algorithm.sh
           bash -n deploy/release/Update-Worker.sh
+          bash -n deploy/release/Install-Worker.sh
+          bash -n deploy/release/Start-Background-Worker.sh
+          bash -n deploy/release/Stop-Worker.sh
+          bash -n deploy/release/Worker-Status.sh
+          bash -n deploy/release/Client-Worker.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

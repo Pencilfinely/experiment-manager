@@ -140,6 +140,7 @@ class Hub:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.project_upload_locks = {}
+        self.local_imports = None
         self.config = read_json(self.root / "hub.json")
         if self.config is None:
             self.config = {"admin_token": secrets.token_urlsafe(32), "nodes": {}}
@@ -211,8 +212,17 @@ class Hub:
                 raise
 
     def close(self):
+        if self.local_imports is not None:
+            self.local_imports.close()
         with self.lock:
             self.db.close()
+
+    def project_imports(self):
+        with self.lock:
+            if self.local_imports is None:
+                from .project_import import ProjectImports
+                self.local_imports = ProjectImports(self)
+            return self.local_imports
 
     def add_node(self, node_id):
         if not isinstance(node_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", node_id):
@@ -763,6 +773,10 @@ def make_server(hub, host="127.0.0.1", port=8765):
             required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download") else "admin"
             if role != required_role:
                 raise APIError(403, "Token does not have permission for this endpoint")
+            if path.startswith("/api/local/"):
+                from .project_import import is_loopback
+                if not is_loopback(self.client_address[0]):
+                    raise APIError(403, "Local folders are accessible only from this controller computer; upload a project ZIP remotely")
             query = parse_qs(url.query)
             def parameter(name):
                 values = query.get(name, [])
@@ -770,7 +784,11 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     raise APIError(400, f"Exactly one {name} query parameter is required")
                 return values[0]
             if self.command == "GET":
-                if path == "/api/node-info":
+                if path == "/api/local/imports":
+                    self._send(hub.project_imports().listing())
+                elif path == "/api/local/imports/item":
+                    self._send(hub.project_imports().item(parameter("id")))
+                elif path == "/api/node-info":
                     self._send({"node_id": node_id, "paired": True})
                 elif path == "/api/projects/download":
                     offset = parameter("offset")
@@ -807,6 +825,12 @@ def make_server(hub, host="127.0.0.1", port=8765):
                           "/api/enroll": hub.enroll,
                           "/api/projects/upload": hub.project_upload, "/api/projects/deploy": hub.project_deploy,
                           "/api/sync": lambda p: hub.sync(node_id, p), "/api/upload": lambda p: hub.upload(node_id, p)}
+                if path.startswith("/api/local/imports/"):
+                    imports = hub.project_imports()
+                    routes.update({"/api/local/imports/start": imports.start,
+                                   "/api/local/imports/browse": imports.browse,
+                                   "/api/local/imports/save": imports.save,
+                                   "/api/local/imports/publish": imports.publish})
                 if path not in routes:
                     raise APIError(404, "Not found")
                 self._send(routes[path](payload))

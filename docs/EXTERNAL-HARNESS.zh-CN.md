@@ -4,9 +4,21 @@
 
 你已有一个能训练的算法。实验台需要知道四件事：**从哪里启动、传哪些参数、数据在哪、结果去哪。** 外置 harness 把这些信息写在算法目录之外，训练时调用原入口；不要求你给模型或训练循环增加 SDK 代码。
 
-**v0.2.0-rc.2 主控包和算力包包含本流程。旧 v0.2.0-rc.1 不包含项目分发。** 主控端和目标算力端都要更新；节点需上报 `project-bundle-v1` 能力，旧代理不能因为网页更新就自动获得下载、安装项目包的能力。
+**0.3.0-rc.1 已把导入放进实验台页面。** 日常操作不需要额外打开导入终端、复制主控令牌或来回编辑多个文件。主控端和算力端使用相同的新版本；旧代理不能仅靠刷新网页获得新功能。已有部署按[日常使用说明](OPERATIONS.zh-CN.md)复用原配置升级。
 
-已有算力机升级：等当前任务及回传完成，在旧代理窗口按 **Ctrl+C**，保持 Docker 运行；将新算力包完整解压到新的长期保留目录，Windows 双击 **`Update-Worker.cmd`**，Ubuntu 运行 **`bash Update-Worker.sh`**。程序自动寻找原配置；有多个候选时，根据菜单中的节点名和完整路径，选择原启动命令 `--config` 使用的文件。它继续使用原节点身份、镜像、策略和记录，无需重装 WSL/Docker、重新配对或手改配置。以后仍从这个新包的更新入口启动原节点。
+## 先在页面上完成这条流程
+
+1. 在管理电脑打开 **Experiment Center → 算法项目 → 导入算法**。
+2. 点击选择根目录，选现有算法文件夹。不是把某个 `main.py` 单独复制出去；整个项目中的模块和数据关系需要保留。
+3. 等待静态扫描，检查入口候选。下面这个例子应选择 **src/main.py**，工作目录 **src**。软件不会为了识别参数而运行训练。
+4. 在同一页检查固定参数、实验参数预设、数据、依赖和资源。每个预设是一份独立实验配置；可以复制一个正式预设，另建短测试预设。
+5. 保存并检查文件预览。数据包含规则决定哪些文件进入包；不需要发送的数据取消选择。
+6. 确认后发布到项目库，在项目卡片选择算力机并分发。传输、核对、节点配置和环境准备由软件处理。
+7. 等节点安装成功，点击创建实验，先运行短测试，再用正式预设提交科研实验。
+
+下面的表格说明页面中的字段应该怎样填写。JSON 和命令行示例是高级参考，**不要求按顺序手工执行它们才能完成导入**。
+页面导入的草稿在管理端数据目录下的 `imports` 中独立保存；所有源码与参数扫描均不修改原项目。
+远程浏览器不能选择管理电脑的本地目录；远程使用时上传准备好的项目 ZIP。
 
 ## 先认准这份 SASRec
 
@@ -27,9 +39,9 @@ SASRec_Original/
 
 旧文档里的 `E:\PythonProjects\IntentPreference\SASRec_Original` 是另一份实现，它才有 `load_run_config()`、`run_all()` 和专门的恢复协议。那份[旧适配练习](SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md)不适用于本例。
 
-## 第一步：生成一份放在外面的配置
+## 配置保存在哪里？高级命令行入口
 
-v0.2.0-rc.2 Windows 主控包解压目录里有 **`Import-Algorithm.cmd`**；Ubuntu 对应 `bash Import-Algorithm.sh`。本次本地部署另有 **`local-app/04-Import-Algorithm.cmd`**，它是个人入口，不在公共源码中。双击 Windows 入口即可打开导入向导；普通源码用户直接运行：
+页面已经替你生成并编辑外部配置。需要在脚本或旧版部署中单独使用时，Windows 包保留 **`Import-Algorithm.cmd`**，Ubuntu 对应 `bash Import-Algorithm.sh`；源码用户也可运行：
 
 ```powershell
 python -m expman.harness_project wizard
@@ -49,13 +61,13 @@ python -m expman.harness_project prepare --source "E:\PythonProjects\SASRec_Orig
 | `harness.json` | 原入口、参数如何传入、固定路径、指标怎么读取、是否支持原生续训 | 首次接入；原算法接口变化时 |
 | `experiments/*.json` | 每个实验自己的学习率、seed、epoch 等参数 | 新建实验或保存参数预设时 |
 
-首次会生成 `experiments/default.json` 和记录识别依据的 `discovery.json`。向导打开外部配置目录后，你检查这些文件，把 `project.json` 的 `"reviewed": false` 改成 `true`；再次运行同一个入口、填写同一个目录，程序才打包。随后填写主控数据目录 `E:\ExperimentCenter` 和实验台地址即可上传；主控数据目录留空则只生成 ZIP。下面的命令是向导各阶段的对应操作，平时无需全部手打。
+首次会生成 `experiments/default.json` 和记录识别依据的 `discovery.json`。**页面流程中直接检查并确认发布即可**，不用手改 `reviewed`。只有上面的独立命令行流程，才需要编辑外部文件并把 `project.json` 的 `"reviewed": false` 改成 `true`，再运行打包/上传命令。
 
 扫描器只读 Python 语法树，不导入原程序，也不执行 `main.py --help`。这份 SASRec 在文件末尾直接调用 `main()`，贸然导入就可能启动训练，因此静态读取尤其必要。
 
 此时生成的是**待检查的草稿**，尚未启动训练，也没有自动把所有识别结果当成正确设置。
 
-## 第二步：检查向导提取出的内容
+## 检查识别字段：SASRec 示例
 
 这份 SASRec 可以静态读出 24 个参数。你主要检查下面这张表，不需要编写 Python 适配器。
 
@@ -111,11 +123,11 @@ python -m expman.harness_project prepare --source "E:\PythonProjects\SASRec_Orig
 
 原生 Windows 的 `.bat` 不能直接当作 Linux 容器入口；有对应 `main.py` 或 `.sh` 时选那个入口。
 
-## 第三步：把短测试和正式实验分开
+## 把短测试和正式实验分开
 
-生成的 `experiments/default.json` 已包含提取的默认参数，可以作为正式预设保留。需要另起名字时，同时改文件名和其中的 `id`，使每个 `id` 唯一。
+页面生成的默认预设已包含提取的默认参数，可以作为正式预设保留。点击添加/复制实验预设，为短测试取独立名称，修改 `epochs` 和 `star_test`。每个预设的 `id` 唯一。
 
-在同一目录新增 `short.json`，完整内容如下：
+对应的外部 `experiments/short.json` 如下；页面操作不需要手动创建这个文件：
 
 ```json
 {
@@ -132,9 +144,11 @@ python -m expman.harness_project prepare --source "E:\PythonProjects\SASRec_Orig
 
 `star_test` 不能漏改：原程序只有开始验证后才会保存模型，结束时又会加载这个模型；如果只把 300 轮改成 3 轮，却保留 `star_test=100`，最后就可能找不到权重文件。这个值是阅读本例后确认的，通用扫描器不会替每个算法猜测类似的训练约束。
 
-## 第四步：上传一次，选择节点分发
+## 发布一次，选择节点分发
 
-先构建项目包：
+**页面流程：保存配置 → 检查文件预览 → 确认发布。** 完成后项目已经在库里，直接选择节点分发，无需另找 ZIP 上传。
+
+如果使用独立命令行/远程 ZIP 流程，可手动构建项目包：
 
 ```powershell
 python -m expman.harness_project build --project "E:\ExperimentProjects\SASRec" --output "E:\ExperimentPackages\sasrec.zip"
@@ -142,7 +156,7 @@ python -m expman.harness_project build --project "E:\ExperimentProjects\SASRec" 
 
 项目包包含选中的代码、数据、外部配置和实验预设。上传前检查包清单，确认这是你要发给那些算力机的内容。
 
-打开实验台的 **“算法项目 / Projects”**，点击 **“上传项目包 / Upload project”** 选择 ZIP。也可以在**主控电脑**使用已有主控配置上传：
+独立生成的 ZIP 在实验台 **“算法项目 / Projects”** 点击 **“上传项目包 / Upload project”** 导入。命令行也可在**主控电脑**使用已有主控配置上传：
 
 ```powershell
 python -m expman.harness_project publish --bundle "E:\ExperimentPackages\sasrec.zip" --hub "http://127.0.0.1:8765" --center-root "E:\ExperimentCenter"
@@ -152,7 +166,7 @@ python -m expman.harness_project publish --bundle "E:\ExperimentPackages\sasrec.
 
 因此，这个流程不用逐台 Xftp 复制项目、不用登录另一台机器再改路径。节点离线时需等它上线接收；运行环境缺依赖或不兼容时，应修正环境后重试，不能把“收到包”当作“训练验收通过”。
 
-## 第五步：提交短测试，再用正式参数训练
+## 提交短测试，再用正式参数训练
 
 1. 确认目标节点显示项目已安装。
 2. 点击项目的 **“创建实验 / New experiment”**，在 **“节点与实验配置”** 中选择目标节点的 `Video_Games - 3 epoch check`。确认“本次实验参数”后，点击 **“提交实验 / Submit experiment”**。
@@ -183,7 +197,7 @@ harness 生成命令/配置文件
 
 ## 换成其他算法，重复哪些操作？
 
-选择另一个源码目录，生成另一个外部配置目录，然后检查**入口、参数、数据、依赖、日志**五项，再打包、上传、选节点分发。原入口接受 JSON/YAML 时，可让 harness 生成它本来支持的配置文件，再通过原有 `--config` 参数传入；无需改成另一套训练 API。
+在算法项目页面再次选择原源码目录，然后检查**入口、参数、数据、依赖、日志**五项，保存并发布、选节点分发。外部配置与项目包由页面流程生成。原入口接受 JSON/YAML 时，可让 harness 生成它本来支持的配置文件，再通过原有 `--config` 参数传入；无需改成另一套训练 API。
 
 第一次需要检查自动提取草稿。之后，同一接口的实验只换参数预设；代码、数据或调用规则更新则发布新项目包，旧实验仍引用它当时的固定版本。
 
