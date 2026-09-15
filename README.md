@@ -5,7 +5,7 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.3.0-rc.2 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+**0.3.0-rc.3 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
 This version adds checking, downloading and installing updates in both Windows applications, plus distinct Center and Worker icons. Updates start when you request them; unattended background upgrades are not included.
 
 ## Download and install

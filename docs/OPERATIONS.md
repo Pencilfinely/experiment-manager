@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.md)
 
-This guide covers the **0.3.0-rc.2 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+This guide covers the **0.3.0-rc.3 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
 
 ## Open, close a window, or stop a service
 

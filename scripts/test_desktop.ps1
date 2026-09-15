@@ -170,7 +170,7 @@ try {
         }
         $iconName = if ($role -eq 'controller') { 'center.ico' } else { 'worker.ico' }
         $expectedIconHash = (Get-FileHash -LiteralPath (Join-Path $repoRoot ('assets/' + $iconName)) -Algorithm SHA256).Hash
-        if ($report.icon_sha256 -ine $expectedIconHash -or ($report.runtime_icon_sizes -join ',') -ne '16,20,24,32,40,48,64,128') {
+        if ($report.icon_sha256 -ine $expectedIconHash -or ($report.runtime_icon_sizes -join ',') -ne '16,20,24,28,32,36,40,44,48,56,64,72,80,88,96,112,128') {
             throw "Embedded icon resource or its frames do not match the expected role: $role"
         }
         Write-Output "PASS $role : native compilation, role-specific EXE/window/tray icons, WinForms ICO frames, embedded role, bare options, exact Python argv roundtrip."

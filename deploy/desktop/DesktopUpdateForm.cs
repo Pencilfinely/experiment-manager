@@ -6,9 +6,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ExperimentManagerDesktop {
-    sealed class UpdateForm : Form {
+    sealed class UpdateForm : IconForm {
         readonly ClientForm client;
-        readonly Icon appIcon=App.LoadIcon(SystemInformation.IconSize);
         readonly Label versions=new Label { AutoSize=true };
         readonly Label status=new Label { AutoSize=true, MaximumSize=new Size(560,0) };
         readonly TextBox notes=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Dock=DockStyle.Fill };
@@ -24,7 +23,7 @@ namespace ExperimentManagerDesktop {
         CancellationTokenSource cancellation;
 
         internal UpdateForm(ClientForm owner) {
-            client=owner; Text="软件更新 · "+App.Title; Icon=appIcon;
+            client=owner; Text="软件更新 · "+App.Title;
             Size=new Size(650,520); MinimumSize=new Size(570,440);
             StartPosition=FormStartPosition.CenterParent; Font=new Font("Microsoft YaHei UI",10);
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
@@ -49,6 +48,7 @@ namespace ExperimentManagerDesktop {
                 available==null?"https://github.com/Pencilfinely/experiment-manager/releases":available.ReleaseUrl){UseShellExecute=true});
             Shown+=async(s,e)=>await Check();
             FormClosing+=(s,e)=>{if(working){e.Cancel=true;closeWhenIdle=true;if(cancellation!=null)cancellation.Cancel();}};
+            ResumeLayout(true);
         }
 
         void Working(bool value) {
@@ -106,7 +106,7 @@ namespace ExperimentManagerDesktop {
 
         protected override void Dispose(bool disposing) {
             if(disposing&&cancellation!=null)cancellation.Cancel();
-            base.Dispose(disposing);if(disposing)appIcon.Dispose();
+            base.Dispose(disposing);
         }
     }
 }

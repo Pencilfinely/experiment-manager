@@ -6,7 +6,8 @@ const path = require('node:path');
 const sharp = require('sharp');
 
 const assets = path.resolve(__dirname, '../assets');
-const sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256];
+// Caption/tray (16 px) and taskbar (32 px) at Windows' 25% scale steps.
+const sizes = [16, 20, 24, 28, 32, 36, 40, 44, 48, 56, 64, 72, 80, 88, 96, 112, 128, 256];
 
 // Runtime sizes use 32-bit DIB for .NET Framework. The Windows shell's
 // 256 px frame uses lossless PNG compression.

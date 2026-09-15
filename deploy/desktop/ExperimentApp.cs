@@ -111,7 +111,7 @@ namespace ExperimentManagerDesktop {
                 if(Has(args,"--self-test")) {
                     // .NET Framework selects at most 128 px from this multi-size
                     // ICO; the 256 px frame remains available to Windows Explorer.
-                    int[] runtimeIconSizes={16,20,24,32,40,48,64,128};
+                    int[] runtimeIconSizes={16,20,24,28,32,36,40,44,48,56,64,72,80,88,96,112,128};
                     foreach(int size in runtimeIconSizes) using(var icon=LoadIcon(new Size(size,size))) using(var bitmap=icon.ToBitmap()) {
                         if(bitmap.Width!=size||bitmap.Height!=size) throw new Exception("Application icon frame is missing: "+size);
                     }
@@ -149,9 +149,8 @@ namespace ExperimentManagerDesktop {
         }
     }
 
-    sealed class InstallerForm : Form {
+    sealed class InstallerForm : IconForm {
         bool installing;
-        readonly Icon appIcon=App.LoadIcon(SystemInformation.IconSize);
         Button install=new Button { Text="安装并启动 / Install", AutoSize=true };
         CheckBox desktop=new CheckBox { Text="创建桌面快捷方式", Checked=true, AutoSize=true };
         CheckBox startup=new CheckBox { Text="登录 Windows 后后台启动", Checked=false, AutoSize=true };
@@ -159,7 +158,7 @@ namespace ExperimentManagerDesktop {
         TextBox pairing=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
         Label status=new Label { AutoSize=true,MaximumSize=new Size(530,0) };
         internal InstallerForm(string[] args) {
-            Text="安装 "+App.Title; Icon=appIcon; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
+            Text="安装 "+App.Title; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
             using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) startup.Checked=run!=null&&run.GetValue("ExperimentManager-"+App.Role)!=null;
             var saved=App.Read(App.SettingsFile);
             if(App.Has(args,"--apply-update"))desktop.Checked=saved.ContainsKey("desktop_shortcut")?App.Flag(saved,"desktop_shortcut"):
@@ -167,6 +166,7 @@ namespace ExperimentManagerDesktop {
             if(App.Worker)pairing.Text=App.Text(saved,"pairing_file");
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
             var panel=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=8 };
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             panel.Controls.Add(new Label { Text=App.Title,Font=new Font(Font.FontFamily,19,FontStyle.Bold),AutoSize=true });
             panel.Controls.Add(new Label { Text="安装到当前用户，不需要管理员权限。运行环境和实验数据分别保存。",AutoSize=true,MaximumSize=new Size(530,0) });
             panel.Controls.Add(new Label { Text=App.Worker?"导入主控提供的配对凭证（已有节点可直接复用）":"主控数据目录（升级时可选择原实验台目录）",AutoSize=true });
@@ -186,10 +186,7 @@ namespace ExperimentManagerDesktop {
             };
             FormClosing+=(s,e)=>{if(installing){e.Cancel=true;status.Text="正在安装，请等待完成后再关闭。";}};
             if(App.Has(args,"--apply-update"))Shown+=(s,e)=>install.PerformClick();
-        }
-        protected override void Dispose(bool disposing) {
-            base.Dispose(disposing);
-            if(disposing) appIcon.Dispose();
+            ResumeLayout(true);
         }
         internal static string Install(string dataPath,string credential,bool makeDesktop,bool autoStart) {
             Mutex active;
@@ -237,11 +234,11 @@ namespace ExperimentManagerDesktop {
         }
     }
 
-    sealed class ClientForm : Form {
-        readonly Icon appIcon=App.LoadIcon(SystemInformation.IconSize);
-        readonly Icon trayIcon=App.LoadIcon(SystemInformation.SmallIconSize);
+    sealed class ClientForm : IconForm {
+        readonly DesktopIcons trayIcons=new DesktopIcons();
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
         UpdateForm updateDialog;
+        BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
@@ -254,7 +251,7 @@ namespace ExperimentManagerDesktop {
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
             string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
-            Text=App.Title; Icon=appIcon; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
+            Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -285,12 +282,12 @@ namespace ExperimentManagerDesktop {
             layout.Controls.Add(new Label {AutoSize=true,MaximumSize=new Size(810,0),Text=App.Worker?"首次导入凭证后自动检查 GPU 和准备环境。关闭此窗口会保留后台运行；停止代理不会终止已有 Docker 训练容器。":"实验、算力和算法项目在同一应用窗口中管理。关闭实验台窗口后，主控继续后台运行。"});
             layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
             Controls.Add(layout);
-            tray=new NotifyIcon { Icon=trayIcon,Text=App.Title,Visible=true };
+            tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出客户端（后台继续运行）",null,(s,e)=>{exiting=true;Close();}); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
-            timer.Tick+=(s,e)=>RefreshState();
+            timer.Tick+=(s,e)=>{tray.Icon=trayIcons.TrayIcon;RefreshState();};
             Shown+=async (s,e)=> {
                 if(App.Worker) {
                     await Execute(async()=>{
@@ -303,14 +300,16 @@ namespace ExperimentManagerDesktop {
                 } else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
                 timer.Start();
             };
+            ResumeLayout(true);
         }
         protected override void Dispose(bool disposing) {
             if(disposing) {
                 timer.Dispose();
+                if(browserWindowIcons!=null)browserWindowIcons.Dispose();
                 if(tray!=null) { tray.Visible=false; tray.Dispose(); tray=null; }
             }
             base.Dispose(disposing);
-            if(disposing) { appIcon.Dispose(); trayIcon.Dispose(); }
+            if(disposing) trayIcons.Dispose();
         }
         static void AddButton(Control parent,string text,Action action) {var button=new Button {Text=text,AutoSize=true,Margin=new Padding(0,8,12,8)};button.Click+=(s,e)=>action();parent.Controls.Add(button);}
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}}finally{busy=false;} }
@@ -427,6 +426,8 @@ namespace ExperimentManagerDesktop {
             if(!File.Exists(edge))edge=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"Microsoft","Edge","Application","msedge.exe");
             if(!File.Exists(edge)){Process.Start(new ProcessStartInfo(url){UseShellExecute=true});return;}
             string profile=Path.Combine(App.SettingsRoot,"web-profile");
+            if(browserWindowIcons==null)browserWindowIcons=new BrowserAppWindow(edge,profile);
+            browserWindowIcons.Start();
             Process.Start(new ProcessStartInfo(edge,App.Arguments("--app="+url,"--user-data-dir="+profile,"--no-first-run","--no-default-browser-check")){UseShellExecute=false,CreateNoWindow=true});
         }
     }

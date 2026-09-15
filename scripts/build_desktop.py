@@ -16,10 +16,13 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'deploy/desktop/ExperimentApp.cs'
 VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
-EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/desktop/DesktopUpdateForm.cs')
+EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/desktop/DesktopUpdateForm.cs',
+                 ROOT / 'deploy/desktop/DesktopIcons.cs', ROOT / 'deploy/desktop/BrowserAppWindow.cs')
+MANIFEST = ROOT / 'deploy/desktop/app.manifest'
 ICONS = {'controller': ROOT / 'assets/center.ico', 'worker': ROOT / 'assets/worker.ico'}
 REFERENCES = ('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll',
-              'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll', 'Microsoft.CSharp.dll')
+              'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll', 'Microsoft.CSharp.dll',
+              'System.Management.dll')
 
 
 def find_compiler(supplied=None):
@@ -63,6 +66,7 @@ def compile_desktop(output, role, payload=None, compiler=None):
         target = temporary / output.name
         args = [str(executable), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
                 '/out:' + str(target), '/resource:' + str(role_file) + ',Role',
+                '/win32manifest:' + str(MANIFEST.resolve(strict=True)),
                 '/win32icon:' + str(icon), '/resource:' + str(icon) + ',AppIcon',
                 '/resource:' + str(version_file) + ',AppVersion']
         args.extend('/reference:' + name for name in REFERENCES)

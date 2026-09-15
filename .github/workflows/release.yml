@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.3.0-rc.2
+        default: v0.3.0-rc.3
 permissions:
   contents: write
 env:
@@ -30,6 +30,8 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/test_desktop.ps1
+          ./scripts/test_icons.ps1
+          ./scripts/test_browser_icons.ps1
           ./scripts/test_updates.ps1
       - run: python scripts/build_release.py --download-python
       - name: Create draft with application ZIPs and native Windows installers

@@ -32,6 +32,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test_updates.ps1
+      - name: Windows DPI and native window icons
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/test_icons.ps1
+          ./scripts/test_browser_icons.ps1
       - if: runner.os == 'Linux'
         run: |
           bash -n deploy/release/Start-Worker.sh
