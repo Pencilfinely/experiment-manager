@@ -158,6 +158,26 @@ def _safe_path(root, relative):
     return path
 
 
+def _matches(root, pattern):
+    """Include literal dangling links even on Python versions whose glob skips them."""
+    parts = Path(pattern).parts
+    literal_parts = []
+    for part in parts:
+        if any(character in part for character in "*?["):
+            break
+        literal_parts.append(part)
+    # Check literal ancestors before globbing: 'linked-dir/missing.log' must not
+    # quietly disappear when the linked target or requested child is missing.
+    _safe_path(root, Path(*literal_parts))
+    if len(literal_parts) == len(parts):
+        candidate = root / pattern
+        if candidate.exists() or candidate.is_symlink():
+            yield _safe_path(root, pattern)
+        return
+    for candidate in root.glob(pattern):
+        yield _safe_path(root, candidate.relative_to(root))
+
+
 def _copy_source(source, target):
     if not source.is_dir() or source.is_symlink():
         raise ValueError("Source must be a regular project directory")
@@ -262,7 +282,7 @@ class _Metrics:
         for index, (rule, _) in enumerate(self.rules):
             if rule.get("stream") != "file":
                 continue
-            for path in self.run.output.glob(rule["path"]):
+            for path in _matches(self.run.output, rule["path"]):
                 _safe_path(self.run.output, path.relative_to(self.run.output))
                 if path.is_dir():
                     continue
@@ -505,7 +525,7 @@ def execute(manifest, source, run=None):
     metrics.poll_files(final=True)
     artifacts = []
     for pattern in manifest["artifacts"]:
-        for path in workspace.glob(pattern):
+        for path in _matches(workspace, pattern):
             _safe_path(workspace, path.relative_to(workspace))
             if path.is_dir():
                 continue

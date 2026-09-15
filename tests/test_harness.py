@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from expman.harness import _Metrics, execute, validate_manifest
+from expman.harness import _matches, _Metrics, execute, validate_manifest
 from expman.sdk import Run
 from tests.support import temporary_directory
 
@@ -158,6 +158,20 @@ else:
         records = (self.output / "metrics.jsonl").read_text().splitlines()
         self.assertEqual(len(records), 1)
         self.assertEqual(json.loads(records[0])["step"], 7)
+
+    def test_literal_and_nested_link_detection_does_not_depend_on_glob_version(self):
+        linked = self.root / "dangling"
+        original_is_symlink = Path.is_symlink
+
+        def is_symlink(path):
+            return path == linked or original_is_symlink(path)
+
+        # Simulate a dangling link and Python 3.10's empty literal-glob result.
+        # This also runs on Windows without requiring link-creation privileges.
+        with patch.object(Path, "glob", return_value=iter(())), patch.object(Path, "is_symlink", is_symlink):
+            for pattern in ("dangling", "dangling/absent.log", "dangling/*.log"):
+                with self.subTest(pattern=pattern), self.assertRaisesRegex(ValueError, "Symbolic links"):
+                    list(_matches(self.root, pattern))
 
     def test_verbose_console_backpressure_preserves_all_raw_output(self):
         (self.source / "main.py").write_text("for i in range(2000): print('line-' + str(i))", encoding="utf-8")
