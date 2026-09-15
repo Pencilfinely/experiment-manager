@@ -107,12 +107,14 @@ def inspect_project(project, config_path):
     return sources, data, params, research
 
 
-def import_project(root, project, config_path='config/video_games_full.json', name=None, profile=None):
+def import_project(root, project, config_path='config/video_games_full.json', name=None, profile=None,
+                   node_config=None):
     root = local_path(root).resolve()
-    config = read_json(root / 'node.ready.json')
+    node_config = local_path(node_config).resolve() if node_config else root / 'node.ready.json'
+    config = read_json(node_config)
     if not config:
         raise ValueError('Start and pair the worker first / 请先完成算力端配对')
-    original = (root / 'node.ready.json').read_bytes()
+    original = node_config.read_bytes()
     sources, data, params, research = inspect_project(project, config_path)
     name = name or 'sasrec-' + params['dataset'].lower().replace('_', '-')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name):
@@ -135,7 +137,7 @@ def import_project(root, project, config_path='config/video_games_full.json', na
             raise RuntimeError('Could not prepare the private Git snapshot: ' + result.stderr[-700:])
         return result.stdout.strip()
     with InstanceLock(root / 'setup.lock'), InstanceLock(Path(config['root']) / 'agent.lock'):
-        if (root / 'node.ready.json').read_bytes() != original:
+        if node_config.read_bytes() != original:
             raise ValueError('Worker configuration changed; rerun the importer')
         if repo.is_symlink() or asset_path.is_symlink():
             raise ValueError('Import destinations cannot be symbolic links')
@@ -178,7 +180,11 @@ def import_project(root, project, config_path='config/video_games_full.json', na
         for label, task in (('short', short), ('formal', formal)):
             private_write(root / 'imports' / name / (label + '.task.json'), task)
         private_write(root / 'imports' / name / 'import-report.json', receipt)
-        private_write(root / 'node.ready.json', config)
+        if encoded(config) != original:
+            backup = root / 'imports' / name / ('node-config-before-' + digest(original)[:16] + '.json')
+            if not backup.exists():
+                private_write(backup, json.loads(original.decode('utf-8-sig')))
+        private_write(node_config, config)
     return receipt
 
 

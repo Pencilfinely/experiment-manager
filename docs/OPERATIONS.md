@@ -56,7 +56,7 @@ task; editing a local template does not rewrite an already submitted experiment.
 
 ## Connect your own SASRec project
 
-Start with the [plain-language explanation and simplified importer](ALGORITHM-INTEGRATION.md#a-compatible-sasrec_original-already-has-an-adapter). The current source checkout can import a compatible implementation from its project directory and research configuration. The manual workflow below remains available in the v0.2.0-rc.1 ZIPs.
+Start with the [complete file-editing and cross-machine workflow](ALGORITHM-INTEGRATION.md). The current source can export compatible SASRec source, data and configuration into a ZIP, then install it on a recipient and generate local templates. The new tool is not in the published v0.2.0-rc.1 ZIPs; the manual registration workflow below remains available there.
 
 The adapter expects a user-provided compatible implementation with
 `src/experiment.py`, `datasets.py`, `models.py`, `modules.py`, `trainers.py`,

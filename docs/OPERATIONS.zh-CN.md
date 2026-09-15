@@ -53,7 +53,7 @@ git -c user.name=Example -c user.email=example@localhost commit -m 'Add GPU exam
 
 ## 接入自己的 SASRec 项目
 
-**先看[通俗的接入说明与简化导入工具](ALGORITHM-INTEGRATION.zh-CN.md#对兼容的-sasrec_original无需再改训练代码)。** 对兼容实现，训练适配已完成；源码版的新工具只需要算法目录和科研配置，会自动制作快照、登记数据并生成任务。下面保留的是 v0.2.0-rc.1 ZIP 的通用向导流程。
+**先看[从改文件到跨机器运行的完整步骤](ALGORITHM-INTEGRATION.zh-CN.md)。** 当前源码可以把兼容 SASRec 的代码、数据、配置导出为一个 ZIP，传到目标节点后安装并生成当地模板。新工具不在已发布的 v0.2.0-rc.1 ZIP 中；下面保留的是该版本的手动登记流程。
 
 适配器需要用户提供兼容的实现：包含 `src/experiment.py`、`datasets.py`、`models.py`、`modules.py`、`trainers.py`、`utils.py`、`main.py`，以及适配器所调用的结构化回调和检查点接口。
 它不是对所有名为 SASRec 的仓库都通用。具体接口可在源码仓库的 `expman/adapters/sasrec.py` 和部署辅助脚本 `scripts/sasrec_first_run.py` 中查看。

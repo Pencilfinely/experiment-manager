@@ -144,7 +144,7 @@ return work together. It is a deployment check, not a model-quality benchmark.
 
 ## Run your own experiments
 
-Start with [what actually changes when integrating an algorithm](docs/ALGORITHM-INTEGRATION.md). It separates algorithm adaptation, per-worker registration and routine submissions, and describes the simplified importer for compatible SASRec projects.
+Start with [the complete file-editing and cross-machine workflow](docs/ALGORITHM-INTEGRATION.md): a runnable added entry, a direct-versus-managed result check, and SASRec export, Xftp transfer, recipient installation and browser submission. The SASRec project transfer tool is new in the current source and is not in the published v0.2.0-rc.1 ZIPs.
 
 Installing the worker prepares the manager's runtime. Your algorithm, dataset and
 training parameters remain yours to choose; setup cannot infer every project's
