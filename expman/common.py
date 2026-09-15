@@ -96,6 +96,8 @@ def validate_task(spec):
         if not isinstance(value, str) or not value.strip() or len(value) > 200:
             raise ValueError(f"{key} must be a nonempty string of at most 200 characters")
     backend = result.setdefault("backend", "docker")
+    if "resume_supported" in result and not isinstance(result["resume_supported"], bool):
+        raise ValueError("resume_supported must be true or false")
     if backend not in ("demo", "docker"):
         raise ValueError("backend must be demo or docker")
     if not isinstance(result.setdefault("params", {}), dict):

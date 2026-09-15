@@ -12,14 +12,14 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.0-rc.1'
+VERSION = '0.2.0-rc.2'
 PYTHON_VERSION = '3.13.15'
 PYTHON_URL = f'https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip'
 PYTHON_SHA256 = 'd1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf'
 ROLES = {
-    'windows-controller-x64': ('Start-Controller.cmd', 'Allow-Worker-Connections.cmd', 'Allow-Worker-Connections.ps1'),
-    'windows-worker-x64': ('Start-Worker.cmd', 'Start-Worker.ps1', 'Start-Worker.sh', 'Configure-Project.cmd', 'Configure-Project.sh'),
-    'ubuntu-worker-x64': ('Start-Worker.sh', 'Configure-Project.sh'),
+    'windows-controller-x64': ('Start-Controller.cmd', 'Allow-Worker-Connections.cmd', 'Allow-Worker-Connections.ps1', 'Import-Algorithm.cmd'),
+    'windows-worker-x64': ('Start-Worker.cmd', 'Start-Worker.ps1', 'Start-Worker.sh', 'Configure-Project.cmd', 'Configure-Project.sh', 'Update-Worker.cmd', 'Update-Worker.ps1', 'Update-Worker.sh'),
+    'ubuntu-worker-x64': ('Start-Worker.sh', 'Configure-Project.sh', 'Import-Algorithm.sh', 'Update-Worker.sh'),
 }
 
 
@@ -30,7 +30,7 @@ def application_files(root=ROOT):
             if path.is_symlink():
                 raise ValueError('Release inputs cannot be symlinks')
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md'):
+    for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md', 'docs/EXTERNAL-HARNESS.md', 'docs/EXTERNAL-HARNESS.zh-CN.md'):
         files[name] = (root / name).read_bytes()
     for name in ('examples/managed-project/train.py', 'examples/managed-project/expman_entry.py',
                  'examples/managed-project/check_local.py', 'examples/managed-project/example-data/train.csv',

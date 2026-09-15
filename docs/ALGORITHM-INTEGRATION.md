@@ -1,4 +1,6 @@
-# Connect an algorithm and run it on another computer
+# Legacy reference: SDK integration and manual project transfer
+
+> For new projects, use the [external harness and automatic distribution workflow](EXTERNAL-HARNESS.md). It calls the original entry without source changes. The statements below about missing browser uploads describe older versions. This SASRec example targets the separate IntentPreference implementation, not `E:\PythonProjects\SASRec_Original`.
 
 [简体中文](ALGORITHM-INTEGRATION.zh-CN.md) · [Worker installation](../README.md)
 

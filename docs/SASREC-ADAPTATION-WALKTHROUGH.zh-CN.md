@@ -1,4 +1,6 @@
-# 用 SASRec_Original 学会亲手写一个实验台适配入口
+# 历史参考：另一份 SASRec 实现的 SDK 适配练习
+
+> 更正：本篇对应 `E:\PythonProjects\IntentPreference\SASRec_Original`，不是你指定的 `E:\PythonProjects\SASRec_Original`。下面的 `run-all`、`run_all()` 等接口不适用于后者。新项目请使用[不改源码的外置 harness 流程](EXTERNAL-HARNESS.zh-CN.md)；本篇仅保留给已经使用旧接口的项目。
 
 本篇回答：**拿到一个算法项目后，怎样判断要改哪里，并亲手把它改成实验台能调用的形式。**
 

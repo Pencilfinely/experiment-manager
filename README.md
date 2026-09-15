@@ -5,7 +5,7 @@
 Run GPU experiments on your computers and follow them from one browser. Keep the
 code version, environment, parameters, logs, metrics and checkpoints together.
 
-**Release: 0.2.0-rc.1 — a preview release.** The controller and worker are separate
+**Release: 0.2.0-rc.2 — a preview release.** The controller and worker are separate
 applications. The controller does not train models. Install both editions on a
 Windows computer if it should manage experiments and also contribute its GPU.
 
@@ -142,38 +142,66 @@ Keep Docker and the worker console running while using the node.
 This proves browser submission, assignment, a real GPU container and result
 return work together. It is a deployment check, not a model-quality benchmark.
 
+## Upgrade a worker that already runs experiments
+
+Use **`Update-Worker.cmd`** on Windows or **`bash Update-Worker.sh`** on Ubuntu
+from the new worker package. You do not need to reinstall WSL/Docker, pair the
+node again, or edit its configuration manually.
+
+1. Wait until current experiments finish and pending uploads reach zero. Press
+   **Ctrl+C** in the old agent console, leaving Docker running.
+2. Extract the complete **v0.2.0-rc.2 worker ZIP** into a new permanent directory
+   and run its update entry.
+3. On Windows, use the original Ubuntu distribution. The updater discovers saved
+   node configurations. When several exist, its menu shows node names and full
+   paths; select the one used by the old startup command's `--config` option.
+4. Wait for the node to reconnect without “需更新算力代理” in the project area.
+   It can then receive packages. Use the same new package's update entry for
+   future starts; the original identity, policies, images and experiment records are reused.
+
 ## Run your own experiments
 
-For an implementation walkthrough using the real SASRec training code, see the [step-by-step adaptation lesson (Chinese)](docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md) and its executable scripts in `examples/sasrec-adaptation`.
+**Use an external harness: keep the algorithm's original `main.py` or startup
+script and describe how to run it in a separate configuration directory.**
+Follow [Connect an unchanged algorithm and distribute it from the controller](docs/EXTERNAL-HARNESS.md).
+**v0.2.0-rc.2 includes this workflow; the older v0.2.0-rc.1 ZIPs do not.**
+Use the new version on both controller and workers. Existing workers keep their
+configuration through the update entry described above.
 
-Start with [the complete file-editing and cross-machine workflow](docs/ALGORITHM-INTEGRATION.md): a runnable added entry, a direct-versus-managed result check, and SASRec export, Xftp transfer, recipient installation and browser submission. The SASRec project transfer tool is new in the current source and is not in the published v0.2.0-rc.1 ZIPs.
+1. Run the import wizard and select the original source directory and entry. It
+   reads arguments statically and writes an external configuration draft; it does
+   not execute `--help` or write into the research project.
+2. Review `project.json` for source, data, runtime and resource budgets;
+   `harness.json` for invocation, fixed paths and log parsing; and
+   `experiments/*.json` for separate experiment parameter presets.
+3. Build and upload the project package. In the controller's Projects area,
+   select workers and deploy. Once installation succeeds, submit a short test
+   using the corresponding experiment preset.
+4. Change seeds or learning rates in the browser for subsequent experiments.
+   Publish a new package version when code, data or invocation configuration changes.
 
-Installing the worker prepares the manager's runtime. Your algorithm, dataset and
-training parameters remain yours to choose; setup cannot infer every project's
-dependencies or scientifically appropriate settings.
+Workers download and verify the package, prepare their own private source snapshot
+and data, and launch the original entry in a separate working copy. Console output
+and generated files belong to that experiment. You do not need to repeat adapter
+edits on every computer, initialize Git in the original project, or enter another
+computer's dataset paths manually.
 
-For a local Git project compatible with the supplied PyTorch environment:
+The SASRec example now refers specifically to **`E:\PythonProjects\SASRec_Original`**:
+entry `src/main.py`, a single `Video_Games.test.txt` dataset file, and dependencies
+including PyTorch, NumPy, SciPy and tqdm. This implementation lacks a complete
+training-resume entry, so resume is disabled while normal experiment execution remains available.
 
-1. Finish/stop current work, exit the worker console, then run
-   **`Configure-Project.cmd`** on Windows, or **`bash Configure-Project.sh`** on Ubuntu.
-2. Enter a project name, its local Git repository root, the training command and
-   an optional dataset folder. The wizard requires a clean, committed repository;
-   it does not commit or discard your research changes.
-3. Restart the worker. Its new project template appears on the controller.
-4. Fill that template, set your experiment parameters and realistic GPU/RAM/CPU
-   budgets in the task editor, and submit. The generated budgets are starting
-   values, not a measurement or a promise that any model will fit.
+Discovery produces a draft. Review dynamic arguments, dependency versions, data
+selection and metric meanings. The harness uses capabilities already exposed by
+the original entry; it does not invent native resume or multi-GPU training.
 
-Code is mounted read-only at `/workspace/code`; outputs belong in
-`/workspace/run`. The optional dataset is registered as `PROJECT-data-v1` and
-mounted read-only under `/assets/PROJECT-data-v1`. The included SDK exposes these
-paths, parameters, metrics and cooperative stop/checkpoint support. Programs that
-write into their own source folder need an output-path adjustment.
-
-See [operations and algorithm integration](docs/OPERATIONS.md) for a complete
-small workload, SASRec setup, parameters, multiple independent tasks, troubleshooting,
-backup and upgrades. The external SASRec implementation and research datasets are
-not distributed in these application ZIPs.
+The previous [SDK integration guide](docs/ALGORITHM-INTEGRATION.md) and
+[SASRec function-adapter lesson (Chinese)](docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md)
+remain developer references. The latter targets the **different implementation at
+`E:\PythonProjects\IntentPreference\SASRec_Original`**, using `load_run_config()` and
+`run_all()`. It does **not** describe the original project above and is no longer
+the recommended integration route. Application downloads do not include users'
+algorithms or research datasets.
 
 ## GPU scheduling: current capabilities
 
@@ -198,9 +226,10 @@ The manager does not silently change batch size, precision or learning rate.
   is offline, then send pending records and files after reconnecting. Unprepared
   jobs may still need Git/image access. New jobs cannot be submitted to an offline
   controller.
-- Stop/resume requires an adapter that saves complete training state. A generic
-  process cannot gain reliable model/optimizer/RNG recovery just by being wrapped
-  in Docker. The SASRec adapter includes explicit recovery support.
+- Resume is enabled only when the original program already supports it and its
+  resume entry is explicitly configured. Projects without resume can still train;
+  an interrupted run must start again. The old specific SASRec adapter's resume
+  support does not apply to every project named SASRec.
 - A completed task's files can still be uploading. Check both task status and
   pending uploads before shutting machines down.
 - This preview uses foreground launchers, not installed system services. Windows

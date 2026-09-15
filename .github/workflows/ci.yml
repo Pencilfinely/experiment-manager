@@ -28,6 +28,8 @@ jobs:
         run: |
           bash -n deploy/release/Start-Worker.sh
           bash -n deploy/release/Configure-Project.sh
+          bash -n deploy/release/Import-Algorithm.sh
+          bash -n deploy/release/Update-Worker.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

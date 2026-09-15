@@ -5,10 +5,80 @@ const startupToken = new URLSearchParams(location.hash.slice(1)).get('token');
 if(startupToken){token=startupToken;sessionStorage.setItem('expman_token',token);history.replaceState(null,'',location.pathname+location.search);}
 const names = {queued:'排队中',assigned:'已分配',preparing:'准备资源',staging:'准备资源',ready:'离线就绪',starting:'启动中',running:'运行中',succeeded:'已完成',failed:'失败',interrupted:'已中断',paused:'已保存停止',canceled:'已取消'};
 const terminal = ['succeeded','failed','interrupted','paused','canceled'];
+const projectSelections = new Map(), projectUploads = new Map();
+let projectPresets = [];
+const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
 function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
 async function api(path, body) { const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});if(!response.ok){let msg=await response.text();throw new Error(msg);}return response.json(); }
 function demoTemplate(){ $('spec').value=JSON.stringify({name:'第一次演示',algorithm:'demo',group:'学习使用',metric_protocol:'demo-v1',backend:'demo',params:{steps:30,delay:0.3,seed:42},resources:{gpu_memory_mb:0,cpu:1,ram_mb:256,exclusive:false}},null,2); }
+$('upload-project').onclick=()=>$('project-file').click();
+$('project-file').onchange=async event=>{
+  const file=event.target.files[0];if(!file)return;
+  const key=JSON.stringify([file.name,file.size,file.lastModified]);
+  const upload_id=projectUploads.get(key)||requestId();projectUploads.set(key,upload_id);
+  $('upload-project').disabled=true;$('project-progress').hidden=false;
+  try{
+    if(!file.size||file.size>32*1024**3)throw new Error('项目包必须为 1 byte–32 GiB。');
+    let reply=await api('/api/projects/upload',{upload_id,size:file.size,offset:0,data:''});
+    while(!reply.complete){
+      const offset=reply.offset;
+      if(!Number.isSafeInteger(offset)||offset<0||offset>=file.size)throw new Error('主控返回了无效上传进度。');
+      $('project-progress').textContent=`正在上传 ${file.name} · ${(100*offset/file.size).toFixed(1)}%`;
+      const bytes=new Uint8Array(await file.slice(offset,offset+512*1024).arrayBuffer());
+      let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
+      reply=await api('/api/projects/upload',{upload_id,size:file.size,offset,data:btoa(binary)});
+    }
+    $('project-progress').textContent=`已上传 ${reply.project.name}。请在下方勾选算力机，再点击“分发到所选节点”。`;
+    await refresh();
+  }catch(error){$('project-progress').textContent='上传失败：'+error.message+' 重新选择同一文件可继续上传。';}
+  finally{$('upload-project').disabled=false;event.target.value='';}
+};
+function renderProjects(){
+  $('projects').replaceChildren();
+  for(const project of state.projects||[]){
+    const box=node('div',undefined,'node');
+    box.append(node('strong',project.name),node('p',`${project.project_id} · ${(project.size/1024/1024).toFixed(1)} MiB · ${project.digest.slice(0,12)}`));
+    const chosen=projectSelections.get(project.digest)||new Set();projectSelections.set(project.digest,chosen);
+    for(const worker of state.nodes||[]){
+      const supported=(worker.snapshot?.capabilities||[]).includes('project-bundle-v1');
+      const deployment=(project.deployments||[]).find(item=>item.node_id===worker.id);
+      const label=node('label',undefined,'project-worker'),check=node('input');check.type='checkbox';check.value=worker.id;check.checked=chosen.has(worker.id);check.disabled=!supported;
+      check.onchange=()=>check.checked?chosen.add(worker.id):chosen.delete(worker.id);
+      const statuses={queued:'等待节点领取',downloading:'下载中',installing:'安装中',installed:'已安装',failed:'安装失败'};
+      label.append(check,node('span',`${worker.id} · ${worker.online?'在线':'离线'} · ${supported?(statuses[deployment?.status]||'未分发'):'需更新算力代理'}`));box.append(label);
+      if(deployment?.detail)box.append(node('p',deployment.detail,'muted'));
+    }
+    const deploy=node('button','分发到所选节点 / Deploy','subtle');
+    deploy.onclick=async()=>{try{if(!chosen.size)throw new Error('先勾选目标算力机。');await api('/api/projects/deploy',{digest:project.digest,node_ids:[...chosen]});notify('分发已排队，节点会自动下载和安装。安装完成后点击“创建实验”。');await refresh();}catch(error){notify(error.message);}};
+    const create=node('button','创建实验 / New experiment','subtle');create.onclick=()=>openProjectRun(project);box.append(deploy,create);$('projects').append(box);
+  }
+  if(!(state.projects||[]).length)$('projects').append(node('p','尚未上传项目包。/ No project bundles uploaded.','muted'));
+}
+function openProjectRun(project){
+  projectPresets=[];
+  for(const worker of state.nodes||[]){
+    if(!(project.deployments||[]).some(item=>item.node_id===worker.id&&item.status==='installed'))continue;
+    for(const template of worker.snapshot?.task_templates||[]){
+      if(template.project_id===project.project_id&&(!project.bundle_id||template.project_bundle_id===project.bundle_id))projectPresets.push({worker:worker.id,template});
+    }
+  }
+  if(!projectPresets.length){notify('尚无已安装且回报实验配置的节点。请先分发，等待节点显示“已安装”。');return;}
+  $('project-preset').replaceChildren(...projectPresets.map((item,i)=>{const option=node('option',item.worker+' · '+item.template.name);option.value=String(i);return option;}));
+  $('project-run-title').textContent='创建实验 / New experiment · '+project.name;$('project-run-form').hidden=false;fillProjectPreset();$('project-run-form').scrollIntoView({behavior:'smooth'});
+}
+function fillProjectPreset(){const selectedPreset=projectPresets[Number($('project-preset').value)];if(!selectedPreset)return;$('project-run-name').value=selectedPreset.template.name;$('project-params').value=JSON.stringify(selectedPreset.template.params,null,2);}
+$('project-preset').onchange=fillProjectPreset;
+$('project-run-close').onclick=()=>{$('project-run-form').hidden=true;};
+$('project-run-form').onsubmit=async event=>{
+  event.preventDefault();$('project-run-submit').disabled=true;
+  try{
+    const preset=projectPresets[Number($('project-preset').value)];if(!preset)throw new Error('请选择节点和实验配置。');
+    const spec=JSON.parse(JSON.stringify(preset.template));spec.name=$('project-run-name').value.trim();spec.params=JSON.parse($('project-params').value);
+    if(!spec.params||typeof spec.params!=='object'||Array.isArray(spec.params))throw new Error('参数必须是 JSON 对象。');
+    const result=await api('/api/jobs',{request_id:requestId(),spec});notify(`已提交 ${result.ids.length} 个实验到 ${preset.worker}。可以在实验记录中查看日志和结果。`);await refresh();
+  }catch(error){notify('提交失败：'+error.message);}finally{$('project-run-submit').disabled=false;}
+};
 $('spec').value='';
 $('demo-template').onclick=demoTemplate;
 $('import-task').onclick=()=>$('task-file').click();
@@ -54,7 +124,7 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
     }
     const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
-  renderJobs();
+  renderProjects();renderJobs();
 }
 function renderJobs(){const filter=$('filter').value.toLowerCase();const jobs=(state.jobs||[]).filter(j=>JSON.stringify([j.spec.name,j.spec.algorithm,j.spec.group]).toLowerCase().includes(filter));$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;for(const j of jobs){const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`));const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));const met=j.metrics||{};row.append(title,status,node('td',j.node_id||'等待匹配'),node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));row.onclick=()=>detail(j.id,true);$('jobs').append(row);}}
 $('filter').oninput=renderJobs;
@@ -62,7 +132,7 @@ $('submit-form').onsubmit=async event=>{event.preventDefault();$('submit-button'
 async function download(path,name){try{const response=await fetch(path,{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw new Error(await response.text());const objectURL=URL.createObjectURL(await response.blob()),a=node('a');a.href=objectURL;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(objectURL),1000);}catch(e){notify(e.message);}}
 $('export').onclick=()=>download('/api/results.csv','实验结果.csv');
 async function detail(id,scroll){selected=id;try{const data=await api('/api/job?id='+encodeURIComponent(id)),j=data.job||data;$('detail').hidden=false;$('detail-name').textContent=j.spec.name;$('detail-state').textContent=`${names[j.state]||j.state} · 节点 ${j.node_id||'未分配'} · 尝试 ${j.attempt||1} · ${typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||'')}`;$('detail-spec').textContent=JSON.stringify({id:j.id,source:j.spec.source,params:j.spec.params,resources:j.spec.resources,environments:j.spec.environments,metric_protocol:j.spec.metric_protocol},null,2);
-  const events=data.events||j.events||[];$('events').textContent=events.slice(-30).map(e=>JSON.stringify(e)).join('\n');$('actions').replaceChildren();const options=terminal.includes(j.state)?(['paused','interrupted','failed'].includes(j.state)?[['resume','从检查点恢复']]:[]):[['stop','请求保存并停止'],['cancel','取消实验']];for(const [action,label] of options){const b=node('button',label,'subtle');b.onclick=async()=>{try{await api('/api/action',{job_id:id,action});notify('请求已记录；节点收到并执行后才会更新状态。离线节点不会立即响应。');await detail(id,false);}catch(e){notify(e.message);}};$('actions').append(b);}
+  const events=data.events||j.events||[];$('events').textContent=events.slice(-30).map(e=>JSON.stringify(e)).join('\n');$('actions').replaceChildren();const options=terminal.includes(j.state)?(['paused','interrupted','failed'].includes(j.state)&&j.spec.resume_supported!==false?[['resume','从检查点恢复']]:[]):[[j.spec.resume_supported===false?'cancel':'stop',j.spec.resume_supported===false?'停止实验（无续训）':'请求保存并停止'],...(j.spec.resume_supported===false?[]:[['cancel','取消实验']])];for(const [action,label] of options){const b=node('button',label,'subtle');b.onclick=async()=>{try{await api('/api/action',{job_id:id,action});notify('请求已记录；节点收到并执行后才会更新状态。离线节点不会立即响应。');await detail(id,false);}catch(e){notify(e.message);}};$('actions').append(b);}
   $('artifacts').replaceChildren();for(const a of data.artifacts||j.artifacts||[]){const b=node('button',`${a.name} · ${(a.size/1024).toFixed(1)} KiB`,'subtle');b.onclick=()=>download('/api/artifact?job_id='+encodeURIComponent(id)+'&sha256='+encodeURIComponent(a.sha256),a.name.split('/').pop());$('artifacts').append(b);}if(!$('artifacts').children.length)$('artifacts').append(node('p','还没有完整回传的文件。运行状态与文件归档分别同步。','muted'));
   document.getElementById("live-log").textContent=j.log_tail||'等待节点回传日志';metricData=events.map(e=>e.metrics||e.data?.metrics||e.payload?.metrics||{}).filter(m=>Number.isFinite(m.step));if(j.metrics&&Number.isFinite(j.metrics.step))metricData.push(j.metrics);const unique=new Map(metricData.map(m=>[m.step,m]));metricData=[...unique.values()].sort((a,b)=>a.step-b.step);const old=$('metric-select').value,keys=[...new Set(metricData.flatMap(m=>Object.keys(m)))].filter(k=>!['step','time','attempt'].includes(k));$('metric-select').replaceChildren(...keys.map(k=>{const o=node('option',k);o.value=k;return o;}));if(keys.includes(old))$('metric-select').value=old;drawChart();if(scroll)$('detail').scrollIntoView({behavior:'smooth',block:'start'});
 }catch(e){notify('读取详情失败：'+e.message);}}

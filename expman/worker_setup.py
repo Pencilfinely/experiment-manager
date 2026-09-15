@@ -297,8 +297,11 @@ def start(args):
         current = read_json(config_path)
         if current and (current.get('node_id') != pairing['node_id'] or current.get('token') != pairing['token']):
             raise ValueError('Configuration and pairing do not match')
-        state = read_json(root / 'setup-state.json', {})
-        if not current or args.configure or args.gpu or state.get('configured_version') != __version__:
+        # Updating the worker software does not invalidate its enrolled GPU
+        # runtime or authorize replacing the user's GPU/resource preferences.
+        # Project bundles carry their own harness; dependency preparation checks
+        # the selected image when needed. Rebuild/reselect only on explicit setup.
+        if not current or args.configure or args.gpu:
             # The agent lock prevents changes while an existing worker owns this runtime.
             with InstanceLock(root / 'runtime' / 'agent.lock'):
                 setup = WorkerSetup(root, pairing)

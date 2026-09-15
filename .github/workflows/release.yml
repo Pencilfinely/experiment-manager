@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching scripts/build_release.py VERSION
         required: true
-        default: v0.2.0-rc.1
+        default: v0.2.0-rc.2
 permissions:
   contents: write
 env:
@@ -34,4 +34,5 @@ jobs:
         shell: pwsh
         run: |
           $assets = Get-ChildItem dist/*/* -File | ForEach-Object { $_.FullName }
-          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --prerelease --title "Experiment Manager $env:RELEASE_TAG" --notes-file docs/RELEASE-0.2.0-rc.1.md
+          $notes = 'docs/RELEASE-' + $env:RELEASE_TAG.TrimStart('v') + '.md'
+          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --prerelease --title "Experiment Manager $env:RELEASE_TAG" --notes-file $notes

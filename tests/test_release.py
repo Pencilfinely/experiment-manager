@@ -19,6 +19,7 @@ from expman.launcher import InstanceLock, browser_url, reopen_controller
 from expman.pairing import validate_pairing
 from expman.project_setup import register
 from expman.worker_setup import WorkerSetup, load_pairing
+from expman.worker_setup import start as start_worker
 from scripts import build_release
 from tests.support import temporary_directory
 
@@ -141,6 +142,35 @@ class WorkerSetupTests(unittest.TestCase):
             self.assertEqual(config['task_templates'][0]['source']['repo'], str(root / 'repo'))
             self.assertEqual(config['task_templates'][0]['environments'][0]['image'], IMAGE)
             self.assertNotIn(PAIR['token'], json.dumps(config['task_templates']))
+
+    def test_software_upgrade_reuses_enrollment_and_keeps_gpu_and_resource_preferences(self):
+        with temporary_directory() as path:
+            root = Path(path)
+            _, config_path = self.configured(root)
+            config = read_json(config_path)
+            config['tags'] = ['research', 'do-not-reset']
+            config['policy'].update(max_running=3, cpu_budget=7, ram_budget_mb=6000)
+            config['gpu_policy'][GPU['uuid']].update(max_jobs=2, reserve_mb=3072)
+            atomic_json(config_path, config)
+            atomic_json(root / 'pairing.json', PAIR)
+            state_path = root / 'setup-state.json'
+            state = read_json(state_path)
+            state.update(configured_version='0.1.0', docker_endpoint='unix:///var/run/docker.sock')
+            atomic_json(state_path, state)
+            before_config, before_pairing, before_state = (config_path.read_bytes(),
+                (root / 'pairing.json').read_bytes(), state_path.read_bytes())
+            args = argparse.Namespace(root=str(root), pairing=None, configure=False, gpu=[], prepare_only=False)
+            with patch.dict(os.environ), patch('expman.worker_setup.sys.platform', 'linux'), \
+                    patch('os.geteuid', return_value=1000, create=True), \
+                    patch('expman.worker_setup.WorkerSetup', side_effect=AssertionError('A software upgrade must not rebuild/reconfigure GPU runtimes')) as setup, \
+                    patch('expman.agent.run') as agent:
+                start_worker(args)
+                setup.assert_not_called()
+                agent.assert_called_once_with(str(config_path))
+                self.assertEqual(os.environ.get('DOCKER_HOST'), 'unix:///var/run/docker.sock')
+            self.assertEqual(config_path.read_bytes(), before_config)
+            self.assertEqual((root / 'pairing.json').read_bytes(), before_pairing)
+            self.assertEqual(state_path.read_bytes(), before_state)
 
     def test_registry_uses_push_digest_and_refuses_an_unrelated_container(self):
         with temporary_directory() as path:

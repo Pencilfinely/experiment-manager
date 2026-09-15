@@ -22,6 +22,7 @@ import sqlite3
 import threading
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import zipfile
 
 from . import __version__
 from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256_file, validate_task
@@ -33,6 +34,7 @@ STATES = TERMINAL | {"queued", "assigned", "preparing", "ready", "starting", "ru
 PROGRESS = {state: rank for rank, state in enumerate(("queued", "assigned", "preparing", "ready", "starting", "running"))}
 MAX_CHUNK = 512 * 1024
 MAX_BODY = 2 * 1024 * 1024
+MAX_PROJECT_SIZE = 32 * 1024**3
 MAX_INTEGER = 2**63 - 1
 
 
@@ -94,6 +96,9 @@ def _snapshot(value):
         if not isinstance(items, list) or len(items) > 1000 or any(not isinstance(x, str) for x in items):
             raise APIError(400, f"snapshot.{key} must be a string list")
     profiles = _object(value.get("profiles", {}), "snapshot.profiles")
+    capabilities = value.get("capabilities", [])
+    if not isinstance(capabilities, list) or len(capabilities) > 32 or any(not isinstance(item, str) for item in capabilities):
+        raise APIError(400, "snapshot.capabilities must be a string list")
     if any(not isinstance(x, str) for x in profiles.values()):
         raise APIError(400, "snapshot.profiles must map names to image strings")
     templates = value.get('task_templates', [])
@@ -134,6 +139,7 @@ class Hub:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.project_upload_locks = {}
         self.config = read_json(self.root / "hub.json")
         if self.config is None:
             self.config = {"admin_token": secrets.token_urlsafe(32), "nodes": {}}
@@ -173,11 +179,23 @@ class Hub:
             CREATE TABLE IF NOT EXISTS uploads (
                 job_id TEXT NOT NULL REFERENCES jobs(id), sha256 TEXT NOT NULL, size INTEGER NOT NULL,
                 PRIMARY KEY(job_id, sha256));
+            CREATE TABLE IF NOT EXISTS project_uploads (
+                id TEXT PRIMARY KEY, size INTEGER NOT NULL, digest TEXT, completed_digest TEXT);
+            CREATE TABLE IF NOT EXISTS projects (
+                digest TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+                size INTEGER NOT NULL, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS project_deployments (
+                digest TEXT NOT NULL REFERENCES projects(digest), node_id TEXT NOT NULL REFERENCES nodes(id),
+                revision INTEGER NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+                updated REAL NOT NULL, PRIMARY KEY(digest,node_id));
         """)
         with self.transaction():
             columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
             if "log_tail" not in columns:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN log_tail TEXT NOT NULL DEFAULT ''")
+            project_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(projects)")}
+            if "bundle_id" not in project_columns:
+                self.db.execute("ALTER TABLE projects ADD COLUMN bundle_id TEXT NOT NULL DEFAULT ''")
         for node_id in self.config["nodes"]:
             self.db.execute("INSERT OR IGNORE INTO nodes(id) VALUES (?)", (node_id,))
 
@@ -266,7 +284,13 @@ class Hub:
                 item["snapshot"] = json.loads(item["snapshot"])
                 item["online"] = timestamp - item["last_seen"] <= 45
                 nodes.append(item)
-            return {"jobs": jobs, "nodes": nodes, "time": timestamp, "version": __version__}
+            projects = []
+            for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
+                project = dict(row)
+                project["deployments"] = [dict(item) for item in self.db.execute(
+                    "SELECT node_id,revision,status,detail,updated FROM project_deployments WHERE digest=? ORDER BY node_id", (row["digest"],))]
+                projects.append(project)
+            return {"jobs": jobs, "nodes": nodes, "projects": projects, "time": timestamp, "version": __version__}
 
     def submit(self, payload):
         _object(payload, "request")
@@ -310,6 +334,8 @@ class Hub:
             raise APIError(400, "action must be stop, resume or cancel")
         with self.transaction():
             row = self._find_job(payload.get("job_id"))
+            if action == "resume" and json.loads(row["spec"]).get("resume_supported") is False:
+                raise APIError(409, "This algorithm does not provide configured native resume; submit a new experiment")
             if row["action"] == action and row["command_id"] > row["command_ack"]:
                 return {"id": row["id"], "command_id": row["command_id"], "action": action}
             if action == "resume" and row["state"] not in ("interrupted", "paused", "failed"):
@@ -361,7 +387,22 @@ class Hub:
         reports = payload.get("reports", [])
         if not isinstance(reports, list) or len(reports) > 1000:
             raise APIError(400, "reports must be an array with at most 1000 entries")
+        project_reports = payload.get("project_reports", [])
+        if not isinstance(project_reports, list) or len(project_reports) > 100:
+            raise APIError(400, "project_reports must be an array with at most 100 entries")
         with self.transaction():
+            project_checked = []
+            for report in project_reports:
+                _object(report, "project report")
+                digest = self._project_digest(report.get("digest"))
+                revision = _integer(report.get("revision"), "revision", 1)
+                status, detail = report.get("status"), report.get("detail", "")
+                if status not in ("downloading", "installing", "installed", "failed") or not isinstance(detail, str) or len(detail) > 1000:
+                    raise APIError(400, "Invalid project installation report")
+                owned = self.db.execute("SELECT revision FROM project_deployments WHERE digest=? AND node_id=?", (digest, node_id)).fetchone()
+                if not owned:
+                    raise APIError(403, "Project was not deployed to this node")
+                project_checked.append((digest, revision, status, detail))
             # Validate the entire batch before accepting any report or heartbeat.
             checked = []
             for report in reports:
@@ -384,6 +425,8 @@ class Hub:
                 command_ack = _integer(report.get("command_ack", 0), "command_ack", 0, row["command_id"])
                 checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail))
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (now(), _json(snapshot), node_id))
+            for digest, revision, status, detail in project_checked:
+                self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? WHERE digest=? AND node_id=? AND revision=?", (status, detail, now(), digest, node_id, revision))
             ack = {}
             for report, seq, attempt, state, detail, metrics, command_ack, log_tail in checked:
                 row = self._owned(report["id"], node_id)
@@ -419,7 +462,124 @@ class Hub:
                 if row["state"] not in TERMINAL or row["command_id"] > row["command_ack"]:
                     jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
-            return {"jobs": jobs, "mode": mode, "ack": ack}
+            deployments = [dict(row) for row in self.db.execute(
+                "SELECT d.digest,p.size,d.revision FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed') ORDER BY d.updated LIMIT 100", (node_id,))]
+            return {"jobs": jobs, "mode": mode, "ack": ack,
+                    "project_deployments": deployments if "project-bundle-v1" in snapshot.get("capabilities", []) else []}
+
+    @staticmethod
+    def _project_digest(value):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise APIError(400, "Project digest must be 64 lowercase hexadecimal characters")
+        return value
+
+    @contextmanager
+    def _project_upload_guard(self, upload_id):
+        # Serialize retries for this file, not node heartbeats or other uploads.
+        with self.lock:
+            entry = self.project_upload_locks.setdefault(upload_id, {"lock": threading.Lock(), "users": 0})
+            entry["users"] += 1
+        try:
+            with entry["lock"]:
+                yield
+        finally:
+            with self.lock:
+                entry["users"] -= 1
+                if not entry["users"]:
+                    del self.project_upload_locks[upload_id]
+
+    def project_upload(self, payload):
+        """Resumable admin upload; the final ZIP identity is computed by the server."""
+        from .harness_project import read_bundle
+        upload_id = _identifier(payload.get("upload_id"), "upload_id")
+        size = _integer(payload.get("size"), "size", 1, MAX_PROJECT_SIZE)
+        offset = _integer(payload.get("offset"), "offset", 0, size)
+        expected = payload.get("sha256")
+        if expected is not None:
+            self._project_digest(expected)
+        encoded = payload.get("data")
+        if not isinstance(encoded, str) or len(encoded) > ((MAX_CHUNK + 2) // 3) * 4:
+            raise APIError(400, "Project chunk exceeds 512 KiB")
+        try:
+            block = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise APIError(400, "Project data must be base64") from error
+        if len(block) > MAX_CHUNK or offset + len(block) > size:
+            raise APIError(400, "Project chunk exceeds declared size")
+        with self._project_upload_guard(upload_id):
+            with self.transaction():
+                row = self.db.execute("SELECT * FROM project_uploads WHERE id=?", (upload_id,)).fetchone()
+                if row and (row["size"] != size or row["digest"] != expected):
+                    raise APIError(409, "upload_id already identifies another upload")
+                if row and row["completed_digest"]:
+                    project = self.db.execute("SELECT * FROM projects WHERE digest=?", (row["completed_digest"],)).fetchone()
+                    return {"offset": size, "complete": True, "project": dict(project)}
+                self.db.execute("INSERT OR IGNORE INTO project_uploads VALUES (?,?,?,NULL)", (upload_id, size, expected))
+                partial = safe_child(self.root, f"project-partials/{upload_id}.part")
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                current = partial.stat().st_size if partial.exists() else 0
+                if not (offset == 0 and not block) and offset != current:
+                    return {"offset": current, "complete": False}
+                if block:
+                    with partial.open("ab") as stream:
+                        stream.write(block)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    current += len(block)
+                if current < size:
+                    return {"offset": current, "complete": False}
+            # These streaming checks may take minutes for a large dataset. The
+            # SQLite transaction and the coordinator lock have already ended.
+            digest = sha256_file(partial)
+            if expected is not None and digest != expected:
+                partial.unlink()
+                raise APIError(422, "Project checksum mismatch; upload restarts at byte 0")
+            try:
+                manifest = read_bundle(partial)
+            except (ValueError, OSError, KeyError, TypeError, zipfile.BadZipFile) as error:
+                partial.unlink()
+                raise APIError(422, "Invalid external harness project bundle: " + str(error)[:300]) from error
+            final = safe_child(self.root, f"projects/{digest}.zip")
+            final.parent.mkdir(parents=True, exist_ok=True)
+            with self.transaction():
+                os.replace(partial, final)
+                self.db.execute("INSERT OR IGNORE INTO projects(digest,project_id,name,size,created,bundle_id) VALUES (?,?,?,?,?,?)", (digest, manifest["project_id"], manifest["name"], size, now(), manifest.get("bundle_id", "")))
+                self.db.execute("UPDATE project_uploads SET completed_digest=? WHERE id=?", (digest, upload_id))
+                project = self.db.execute("SELECT * FROM projects WHERE digest=?", (digest,)).fetchone()
+                return {"offset": size, "complete": True, "project": dict(project)}
+
+    def project_deploy(self, payload):
+        digest = self._project_digest(payload.get("digest"))
+        node_ids = payload.get("node_ids")
+        if not isinstance(node_ids, list) or not 1 <= len(node_ids) <= 100 or any(not isinstance(item, str) for item in node_ids):
+            raise APIError(400, "Select 1-100 worker node IDs")
+        with self.transaction():
+            if not self.db.execute("SELECT 1 FROM projects WHERE digest=?", (digest,)).fetchone():
+                raise APIError(404, "Upload this project before deploying")
+            for node_id in set(node_ids):
+                row = self.db.execute("SELECT snapshot FROM nodes WHERE id=?", (node_id,)).fetchone()
+                if row is None:
+                    raise APIError(404, "Unknown worker " + node_id)
+                if "project-bundle-v1" not in json.loads(row["snapshot"]).get("capabilities", []):
+                    raise APIError(409, "Worker " + node_id + " must be upgraded and connected once before automatic project delivery")
+            for node_id in set(node_ids):
+                self.db.execute("INSERT INTO project_deployments VALUES (?,?,1,'queued','',?) ON CONFLICT(digest,node_id) DO UPDATE SET revision=revision+1,status='queued',detail='',updated=excluded.updated", (digest, node_id, now()))
+        return {"digest": digest, "node_ids": sorted(set(node_ids)), "status": "queued"}
+
+    def project_download(self, node_id, digest, offset):
+        digest = self._project_digest(digest)
+        offset = _integer(offset, "offset", 0, MAX_PROJECT_SIZE)
+        with self.lock:
+            row = self.db.execute("SELECT p.size FROM projects p JOIN project_deployments d ON p.digest=d.digest WHERE p.digest=? AND d.node_id=?", (digest, node_id)).fetchone()
+            if row is None:
+                raise APIError(403, "Project was not deployed to this node")
+            if offset > row["size"]:
+                raise APIError(400, "Offset exceeds project size")
+            path = safe_child(self.root, f"projects/{digest}.zip")
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                block = stream.read(MAX_CHUNK)
+            return {"data": base64.b64encode(block).decode("ascii"), "offset": offset + len(block), "size": row["size"]}
 
     def job(self, job_id):
         with self.lock:
@@ -600,7 +760,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             if not path.startswith("/api/"):
                 raise APIError(404, "Not found")
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
-            required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info") else "admin"
+            required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download") else "admin"
             if role != required_role:
                 raise APIError(403, "Token does not have permission for this endpoint")
             query = parse_qs(url.query)
@@ -612,6 +772,11 @@ def make_server(hub, host="127.0.0.1", port=8765):
             if self.command == "GET":
                 if path == "/api/node-info":
                     self._send({"node_id": node_id, "paired": True})
+                elif path == "/api/projects/download":
+                    offset = parameter("offset")
+                    if not offset.isdigit():
+                        raise APIError(400, "offset must be nonnegative integer")
+                    self._send(hub.project_download(node_id, parameter("digest"), int(offset)))
                 elif path == "/api/setup-info":
                     from .pairing import address_candidates
                     self._send({"addresses": address_candidates(self.server.server_address[1])})
@@ -640,6 +805,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
                           "/api/enroll": hub.enroll,
+                          "/api/projects/upload": hub.project_upload, "/api/projects/deploy": hub.project_deploy,
                           "/api/sync": lambda p: hub.sync(node_id, p), "/api/upload": lambda p: hub.upload(node_id, p)}
                 if path not in routes:
                     raise APIError(404, "Not found")

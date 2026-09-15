@@ -143,6 +143,8 @@ class Agent:
         self.prep_mutex = threading.Lock()
         self.log_checked = {}
         self.mode = self._meta("hub_mode", "run")
+        from .project_delivery import ProjectDelivery
+        self.project_delivery = ProjectDelivery(self)
         for folder in ("runs", "repos", "worktrees", "upload_cache"):
             (self.root / folder).mkdir(exist_ok=True)
         for record in self.records():
@@ -167,6 +169,10 @@ class Agent:
                 process.wait(timeout=5)
         if self.preparation:
             self.preparation["thread"].join(timeout=6)
+        if self.project_delivery.installing:
+            # Installation only writes immutable project snapshots; finish it before
+            # releasing agent.lock so another agent cannot install concurrently.
+            self.project_delivery.installing["thread"].join()
         self.db.close()
         if os.name == "nt":
             import msvcrt
@@ -240,6 +246,7 @@ class Agent:
                   "disk_free_mb": shutil.disk_usage(self.root).free // (1024 * 1024),
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
                   "platform": sys.platform, "docker_available": False}
+        result["capabilities"] = ["project-bundle-v1"] if sys.platform == "linux" else []
         result["pending_uploads"] = (self.db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
                                      if hasattr(self, "db") else None)
         for name, value in self.config.get("assets", {}).items():
@@ -292,7 +299,8 @@ class Agent:
         pending = [record for record in self.records() if record["seq"] > confirmed.get(record["id"], 0)]
         # Older unsent reports are drained before newly updated active jobs.
         pending.sort(key=lambda record: (record.get("updated", 0), record["id"]))
-        payload = {"node_id": self.config["node_id"], "snapshot": snapshot, "reports": []}
+        payload = {"node_id": self.config["node_id"], "snapshot": snapshot, "reports": [],
+                   "project_reports": self.project_delivery.reports()}
         body_bytes = len(json.dumps(payload, allow_nan=False).encode("utf-8"))
         for record in pending:
             report = self._report(record)
@@ -309,6 +317,7 @@ class Agent:
             self.last_error = None
             self.mode = response.get("mode", self.mode)
             self._set_meta("hub_mode", self.mode)
+            self.project_delivery.accept(response.get("project_deployments", []))
             sent = {report["id"]: report["seq"] for report in payload["reports"]}
             with self.db:
                 for job_id, seq in response.get("ack", {}).items():
@@ -363,6 +372,10 @@ class Agent:
             else:
                 self._save(record, command_ack=command_id)
         elif action == "resume" and record["state"] in TERMINAL - {"succeeded", "canceled"}:
+            if record["spec"].get("resume_supported") is False:
+                self._save(record, command_ack=command_id,
+                    detail="Resume unavailable: this algorithm has no configured native resume; submit a new experiment")
+                return
             if record["spec"]["backend"] == "demo" and _pid_alive(record.get("worker_pid")):
                 # Do not acknowledge yet: safe to retry after the old process exits.
                 self._save(record, detail="Waiting for previous demo process to exit before resume")
@@ -781,6 +794,7 @@ class Agent:
             except (OSError, ValueError) as error:
                 self.last_error = "Archive snapshot deferred: " + str(error)[:500]
         self._uploads()
+        self.project_delivery.tick()
         return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error}
 
 

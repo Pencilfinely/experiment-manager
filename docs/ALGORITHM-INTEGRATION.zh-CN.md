@@ -1,4 +1,6 @@
-# 算法接入和跨机器运行：从改文件到提交实验
+# 历史参考：通过 SDK 接入和手工转移算法
+
+> 当前推荐流程是[外置 harness 和实验台自动分发](EXTERNAL-HARNESS.zh-CN.md)。它直接调用原算法入口，不要求修改源码。本篇描述旧版本，因此下面“网页没有上传功能”及手工转移步骤仅适用于旧版本；其中 SASRec 案例也是另一份 IntentPreference 实现。
 
 [English](ALGORITHM-INTEGRATION.md) · [安装算力端](../README.zh-CN.md)
 

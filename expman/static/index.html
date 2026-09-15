@@ -18,6 +18,17 @@
         <p class="muted">远程节点不能使用 localhost。同名节点会导出原配对身份，只有同一台机器重装时才复用名称。<br>Do not use localhost for remote workers. Reuse a name only when reinstalling the same worker.</p>
         <button>下载配对文件 / Download pairing file</button><button id="pair-close" type="button" class="subtle">关闭 / Close</button>
       </form><div id="nodes" class="nodes"></div></section>
+    <section class="card" id="project-library"><div class="section-title"><h2>算法项目 / Projects</h2><button id="upload-project" class="subtle">上传项目包 / Upload project</button><input id="project-file" type="file" accept=".zip,application/zip" hidden></div>
+      <p class="muted">上传外置 harness 项目包 → 勾选算力机并分发 → 安装完成后选择实验配置、编辑参数并提交。代码和数据由节点自动下载。<br>Upload a harness bundle, deploy to selected workers, then choose a preset and edit its parameters.</p>
+      <p id="project-progress" role="status" hidden></p><div id="projects" class="nodes"></div>
+      <form id="project-run-form" hidden><h3 id="project-run-title">创建实验 / New experiment</h3>
+        <label>节点与实验配置 / Worker and preset<select id="project-preset" required></select></label>
+        <label>实验名称 / Experiment name<input id="project-run-name" required maxlength="200"></label>
+        <label>本次实验参数 / Parameters<textarea id="project-params" rows="10" spellcheck="false" required></textarea></label>
+        <p class="muted">这里只修改这次实验的参数；已上传的项目包和其他实验保持原样。<br>These changes apply only to this experiment.</p>
+        <button id="project-run-submit">提交实验 / Submit experiment</button><button id="project-run-close" type="button" class="subtle">关闭 / Close</button>
+      </form>
+    </section>
     <div class="columns">
       <section class="card"><div class="section-title"><h2>实验记录</h2><button id="export" class="subtle">导出结果 CSV</button></div><input id="filter" placeholder="筛选名称、算法或实验组" aria-label="筛选实验"><div class="table-wrap"><table><thead><tr><th>实验 / 分组</th><th>状态</th><th>节点</th><th>最近指标</th></tr></thead><tbody id="jobs"></tbody></table></div><p id="empty" class="muted">还没有实验。等待算力机上线后，填入节点的验收任务。</p></section>
       <section class="card submit"><h2>提交实验</h2><p class="muted">从节点模板或任务文件填入实验。演示按钮仅用于单独启动的 CPU 演示模式。</p><form id="submit-form"><div class="actions"><button id="import-task" type="button" class="subtle">从文件导入任务</button><input id="task-file" type="file" accept=".json,application/json" hidden></div><label>实验定义 <button id="demo-template" type="button" class="text-button">填入演示</button><textarea id="spec" rows="15" spellcheck="false" required></textarea></label><label>参数组合 <span class="muted">留 {} 表示只跑一次</span><textarea id="grid" rows="3" spellcheck="false">{}</textarea></label><p class="muted">例如 {"seed":[42,43]} 会生成两条独立实验。最多一次 256 个组合。</p><button id="submit-button">提交到队列</button></form></section>
