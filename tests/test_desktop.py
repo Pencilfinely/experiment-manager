@@ -191,6 +191,21 @@ class DesktopTests(unittest.TestCase):
                 connect.side_effect = TimeoutError("port probe timed out")
                 self.assertFalse(desktop.controller_install_status(self.root)["ready_for_install"])
 
+    def test_manual_install_accepts_actual_controller_port_after_shutdown(self):
+        self.serve()
+        self.assertFalse(desktop.controller_install_status(self.root)["ready_for_install"])
+        self.assertEqual(desktop.controller_stop(self.root)["status"], "stopping")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.errors, [])
+        self.assertFalse(desktop._lock_is_held(self.root / "controller.lock"))
+        self.assertFalse((self.root / "desktop-process.json").exists())
+        # Exercise the real loopback probe, including Windows' delayed refusal
+        # after listener shutdown. Mocked immediate refusal missed this path.
+        result = desktop.controller_install_status(self.root)
+        self.assertTrue(result["ready_for_install"], result)
+        self.assertFalse(result["running"])
+
     def test_manual_install_new_directory_and_invalid_local_state(self):
         self.assertTrue(desktop.controller_install_status(self.root)["ready_for_install"])
         self.assertFalse(self.root.exists())

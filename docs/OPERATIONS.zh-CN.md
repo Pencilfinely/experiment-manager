@@ -2,7 +2,7 @@
 
 [English](OPERATIONS.md) · [返回安装说明](../README.zh-CN.md)
 
-本说明适用于 **0.3.0-rc.4 桌面预览版**。日常操作从 Experiment Center 和 Experiment Worker 进入；旧版终端入口保留作兼容和诊断用途。
+本说明适用于 **0.3.0-rc.5 桌面预览版**。日常操作从 Experiment Center 和 Experiment Worker 进入；旧版终端入口保留作兼容和诊断用途。
 
 ## 打开、关窗口和停止运行
 

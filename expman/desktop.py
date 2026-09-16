@@ -252,8 +252,11 @@ def controller_install_status(root):
                 raise ValueError('主控端口配置无效')
             # An authentication or JSON error is not proof that a listener has
             # exited. Refuse migration while anything still owns its local port.
+            # Windows can take just over two seconds to report a closed
+            # loopback port. Allow that refusal to arrive; a real timeout still
+            # leaves installation blocked below.
             try:
-                connection = socket.create_connection(('127.0.0.1', port), timeout=2)
+                connection = socket.create_connection(('127.0.0.1', port), timeout=10)
             except ConnectionRefusedError:
                 pass
             else:
