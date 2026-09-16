@@ -25,7 +25,7 @@ Docker tasks instead use backend=docker, GPU memory >0, source={repo: node-reada
 
 Hub class Hub(root), `serve(root, host='127.0.0.1', port=8765)`. Config root/hub.json created by Hub: admin_token plus nodes tokens. `add_node(node_id)` creates token. SQLite persistent jobs & nodes & command flags; threading lock/transactions. Nodes must be explicitly added by an administrator. Tokens never returned to unauthenticated clients. The release controller launcher listens on all local interfaces and persists its selected port.
 
-- GET / serves static/index.html and /app.js, /style.css public. All /api require bearer auth. Browser uses sessionStorage for token. No CORS.
+- GET / serves static/index.html and /app.js, /timing.js, /style.css public. All /api require bearer auth. Browser uses sessionStorage for token. No CORS.
 - GET /api/state (admin): {jobs:[{id,spec,node_id,state,detail,updated,attempt}],nodes:[{id,last_seen,snapshot,mode}],...}. node tokens do not access admin API.
 - GET /api/setup-info (admin): suggested local IPv4 controller addresses; these are not connectivity guarantees.
 - POST /api/enroll (admin): {node_id,hub_url}; validates the request before adding the node and returns a schema-1 pairing file containing only node_id, hub_url and the node token. Re-export preserves the existing identity.
@@ -51,6 +51,10 @@ Each new Docker container receives both `--gpus device=<assigned UUID>` and an e
 Stop: write root/runs/ID/STOP, request cooperative checkpoint; after configured grace timeout stop only own container, mark interrupted if no valid checkpoint. SDK supports should_stop(), metric(step,**values), publish_checkpoint(file,step), finish(result). Checkpoint manifest has path/hash/step; validates complete file before `paused`. Resume increments attempt, same output directory, sets EXPERIMENT_RESUME=1, removes STOP; checkpoint passed through persistent output. No automatic restart of failed scientific jobs.
 
 Metrics: sdk appends metrics.jsonl and atomic latest_metrics.json; node reports latest metrics while running, stdout attempt-N.log. Archived files use closed-file snapshot: config and final files after terminal status, not live SQLite, not half-written checkpoints. Sync events first; chunk transfers bounded per tick, reconnect retries. Agent continues polling/running if Hub unavailable. Already cached ready tasks run offline; global new assignments paused.
+
+## Experiment timing
+
+Experiment timing is an optional worker report field: `timing={started_at,finished_at,elapsed_seconds,observed_at,complete}`. Timestamps are Unix seconds; start/finish may be null. Duration accumulates running intervals across attempts, excluding preparation, queueing and stopped periods. Workers persist timing locally and report it independently of metrics. Docker lifecycle timestamps recover execution that finishes while the agent is offline; unknown stop times and incomplete history are marked `complete=false`. Older reports may omit timing. The Hub stores timing only with accepted reports and adds its own `received_at`; stale/replayed reports cannot alter it. A newer accepted report without timing clears the stored snapshot. Browser estimates advance from that controller timestamp, avoiding worker/browser clock offsets, and terminal durations stay fixed. CSV `timing.*` columns contain worker snapshots, with `observed_at` identifying when running durations were sampled. Historical jobs without timing remain unknown rather than inferred from submission or last-update times.
 
 ## Validation
 

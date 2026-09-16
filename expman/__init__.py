@@ -1,3 +1,3 @@
 """A small, offline-tolerant experiment manager."""
 
-__version__ = "0.3.0rc3"
+__version__ = "0.3.0rc4"

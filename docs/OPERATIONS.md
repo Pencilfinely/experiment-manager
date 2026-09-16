@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.md)
 
-This guide covers the **0.3.0-rc.3 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+This guide covers the **0.3.0-rc.4 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
 
 ## Open, close a window, or stop a service
 
@@ -10,12 +10,15 @@ This guide covers the **0.3.0-rc.3 desktop preview**. Start ordinary work throug
 |---|---|---|
 | Open the controller | Experiment Center shortcut or tray | Reopens the same service and experiment history |
 | Put the window away | Close the application window | Background work continues; reopen through the tray or application |
+| Exit the controller completely | Center tray menu → Exit | Stops the local controller service and closes its dedicated experiment window; remote experiments continue |
+| Exit the worker completely | Worker tray menu → Exit | Requests cooperative experiment stops, waits for execution to stop, then exits the agent and client; algorithms without native resume cannot promise recovery |
 | Stop accepting new experiments | Controller → Compute → Pause accepting work | Current experiments continue; new assignments/starts pause |
 | Stop the controller | Experiment Center stop control | Controller operations become unavailable; already running worker Docker experiments continue |
 | Stop the worker agent | Experiment Worker stop control | Acceptance/reporting stops; existing Docker experiments are not forcibly killed and can be managed after agent restart |
 | End an experiment | Experiment detail controls | Uses that project's supported stop/cancel behavior |
 
 Before shutdown or upgrade, finish tasks and pending uploads. Stopping the agent does not mean all training containers have ended.
+Tray exit shows progress and keeps the client available if shutdown cannot be confirmed. Pending reports and files remain on the worker for synchronization after the next start. It does not close WSL or Docker Desktop.
 Windows sleep, logout, Docker exit, WSL shutdown or power-off can affect training. Background application operation does not remove these dependencies.
 
 From the Ubuntu worker package directory:
@@ -97,7 +100,14 @@ Updates require your action; checking or downloading alone does not install anyt
 
 ### First upgrade from an older version, Ubuntu and manual installation
 
-**0.3.0-rc.1 and earlier have no Check for updates entry.** Download 0.3.0-rc.2 manually once; future Windows releases can then use the application workflow above. Ubuntu workers continue to use downloaded packages and the existing scripts. Use this procedure for manual Windows upgrades as well:
+**0.3.0-rc.1 and earlier have no Check for updates entry.** Download the current version manually once; future Windows releases can then use the application workflow above. Ubuntu workers continue to use downloaded packages and the existing scripts. Use this procedure for manual Windows upgrades as well:
+
+Opening a newer client does not update an already running backend. If it still
+connects to an rc.1 worker or controller, the safe-stop check can time out because
+that backend does not support the request. Waiting for synchronization will not
+resolve this. Stop the old backend, exit the tray client, then run the downloaded
+installer as below. After installing a worker, choose **Start background agent**
+to run the new software with the existing node configuration.
 
 1. Pause accepting work and finish active experiments and pending uploads.
 2. Stop the old controller/agent in its client, then exit that client from the system tray. For a terminal deployment, press Ctrl+C in its old window. The installer refuses to replace a running same-role client; this is not a hot upgrade.

@@ -23,8 +23,11 @@ import uuid
 from . import __version__, common
 from .launcher import InstanceLock
 from .pairing import validate_pairing
+from .update_protocol import UPDATE_STOP_PROTOCOL, manual_stop_required, supports_update_stop
 from .worker_setup import private_connection, private_write
 from .worker_upgrade import _candidate, agent_is_running, discover_configs
+
+SHUTDOWN_PROTOCOL = 1
 
 
 def default_service_root():
@@ -161,13 +164,21 @@ def status(service_root=None):
     state = common.read_json(root / 'status.json', {})
     running = _owned_process(state)
     result = {key: state[key] for key in ('status', 'detail', 'pid', 'node_id', 'updated_at',
-               'online', 'jobs', 'version') if key in state}
+               'online', 'jobs', 'version', 'shutdown') if key in state}
     result.update(running=running, backend=settings.get('backend', 'detached'),
                   node_id=settings.get('node_id'), config=settings.get('config'),
                   service_root=str(root), log_path=str(root / 'worker.log'),
                   session_note=settings.get('session_note',
                     'Background process; auto-start at login is not configured / 后台运行，未配置登录自启'))
     if running:
+        # _write_status merges old fields, including after launching older code.
+        # Only trust a capability published for this exact process lifetime.
+        if state.get('update_stop_process_identity') == state.get('process_identity'):
+            if 'update_stop_protocol' in state:
+                result['update_stop_protocol'] = state['update_stop_protocol']
+        if state.get('shutdown_process_identity') == state.get('process_identity'):
+            if 'shutdown_protocol' in state:
+                result['shutdown_protocol'] = state['shutdown_protocol']
         return result
     config_path = settings.get('config')
     candidate = _candidate(config_path) if config_path else None
@@ -178,8 +189,13 @@ def status(service_root=None):
     elif state.get('status') in ('starting', 'preparing') and time.time() - state.get('updated_at', 0) < 10:
         # The detached child has not recorded its process identity yet.
         result.update(status=state['status'], detail=state.get('detail', 'Starting worker'))
-    elif state.get('status') == 'failed':
-        result.update(status='failed')
+    elif state.get('status') == 'shutting_down':
+        if state.get('pid') is None and time.time() - state.get('updated_at', 0) < 10:
+            result.update(status='shutting_down', detail='正在启动保存退出检查，请稍候')
+        else:
+            result.update(status='exit_failed', detail='保存退出进程未完成，请重试；实验及待回传数据仍保留在本机')
+    elif state.get('status') in ('failed', 'exit_failed'):
+        result.update(status=state['status'])
     else:
         result.update(status='stopped', pid=None,
             detail='Agent stopped. Existing Docker experiments can continue. '
@@ -198,6 +214,21 @@ def _unit_name(root):
     return 'experiment-manager-worker-' + hashlib.sha256(str(root).encode()).hexdigest()[:12] + '.service'
 
 
+def _spawn_supervisor(root, settings, *, shutdown_only=False):
+    # A stopped older installation can be drained by the current package without
+    # starting its normal scheduler or changing the saved node configuration.
+    package = str(Path(__file__).resolve().parents[1]) if shutdown_only else (
+        settings.get('package_dir') or str(Path(__file__).resolve().parents[1]))
+    executable = sys.executable if shutdown_only else settings.get('python', sys.executable)
+    environment = dict(os.environ, PYTHONPATH=package, PYTHONUNBUFFERED='1')
+    argv = [executable, '-u', '-m', 'expman.worker_service', '_serve', '--service-root', str(root)]
+    if shutdown_only:
+        argv.append('--shutdown-only')
+    with (root / 'worker.log').open('a', encoding='utf-8') as output:
+        subprocess.Popen(argv, cwd=package, env=environment, stdin=subprocess.DEVNULL,
+                         stdout=output, stderr=output, start_new_session=True)
+
+
 def start(service_root=None, *, config=None, pairing=None, worker_root=None):
     _require_linux()
     root = _root(service_root)
@@ -214,19 +245,15 @@ def start(service_root=None, *, config=None, pairing=None, worker_root=None):
             return previous
         _write_status(root, status='starting', detail='Starting worker / 正在启动算力端',
                       node_id=settings['node_id'], pid=None, process_identity=None, online=False,
-                      stop_requested=False)
+                      stop_requested=False, shutdown=None)
+        (root / 'shutdown-request.json').unlink(missing_ok=True)
         if settings.get('backend') == 'systemd':
             reply = subprocess.run(['systemctl', '--user', 'start', _unit_name(root)],
                                    capture_output=True, text=True, timeout=15)
             if reply.returncode:
                 _write_status(root, status='failed', detail='Could not start user service: ' + reply.stderr[-1000:])
             return status(root)
-        package = settings.get('package_dir') or str(Path(__file__).resolve().parents[1])
-        environment = dict(os.environ, PYTHONPATH=package, PYTHONUNBUFFERED='1')
-        with (root / 'worker.log').open('a', encoding='utf-8') as output:
-            subprocess.Popen([settings.get('python', sys.executable), '-u', '-m', 'expman.worker_service',
-                              '_serve', '--service-root', str(root)], cwd=package, env=environment,
-                             stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
+        _spawn_supervisor(root, settings)
         return status(root)
 
 
@@ -249,7 +276,148 @@ def stop(service_root=None):
         return status(root)
 
 
-def _update_containers(candidate):
+def _shutdown_requested(root):
+    request = common.read_json(root / 'shutdown-request.json', {})
+    owner = common.read_json(root / 'status.json', {})
+    return bool(request.get('request_id') and request.get('pid') == owner.get('pid')
+                and request.get('process_identity')
+                and request['process_identity'] == owner.get('process_identity'))
+
+
+def shutdown(service_root=None):
+    """Request checkpoint-and-exit without killing the agent or its experiments."""
+    _require_linux()
+    root = _root(service_root)
+    with InstanceLock(root / 'control.lock'):
+        current = status(root)
+        if current['status'] == 'starting' or (current['status'] == 'preparing' and not current['running']):
+            return dict(current, status='exit_failed', detail='代理正在准备环境，当前步骤尚不能安全取消；'
+                        '请等待准备完成后重试退出。本次未停止任何实验或其他容器。')
+        if not current['running']:
+            if current['status'] == 'shutting_down':
+                return current
+            settings = _settings(root)
+            if settings.get('config') and Path(settings['config']).is_file():
+                _write_status(root, status='shutting_down', pid=None, process_identity=None, online=False,
+                              detail='正在启动保存退出检查；不会启动新的实验')
+                _spawn_supervisor(root, settings, shutdown_only=True)
+                return status(root)
+            # Failed first-time preparation has no usable Agent configuration.
+            # It can still exit, but claim the supervisor lock before publishing
+            # success so a delayed child cannot race us into starting setup.
+            from .desktop import _lock_is_held
+            try:
+                with InstanceLock(root / 'supervisor.lock'):
+                    folders = set()
+                    if settings.get('worker_root'):
+                        folders.add(Path(settings['worker_root']).expanduser().resolve())
+                    if settings.get('config'):
+                        folders.add(Path(settings['config']).expanduser().resolve().parent)
+                    if any(_lock_is_held(folder / 'setup.lock') or
+                           _lock_is_held(folder / 'runtime' / 'agent.lock') for folder in folders):
+                        return dict(current, status='exit_failed', running=True,
+                                    detail='原环境准备或节点代理仍在运行，尚不能确认退出；请稍后重试')
+                    if any((folder / 'runtime' / 'node.sqlite3').exists() for folder in folders):
+                        return dict(current, status='exit_failed',
+                                    detail='原节点配置缺失但实验记录仍在，请恢复配置后保存退出；本次保留了全部数据')
+                    _write_status(root, status='stopped', pid=None, process_identity=None,
+                                  online=False, stop_requested=True,
+                                  detail='环境准备已结束，未运行代理或实验；软件可以退出')
+            except RuntimeError:
+                return dict(current, status='exit_failed', running=True,
+                            detail='原代理或准备进程仍占用服务目录，请等待其退出后重试')
+            return status(root)
+        if type(current.get('shutdown_protocol')) is not int or current['shutdown_protocol'] != SHUTDOWN_PROTOCOL:
+            return dict(current, status='exit_failed', manual_shutdown_required=True,
+                detail='当前后台版本不支持保存实验后退出。请先在实验列表暂停所有运行实验并确认停止，'
+                       '再停止旧代理并启动新版客户端；本次未停止代理，也未中断实验。')
+        owner = common.read_json(root / 'status.json', {})
+        if not _owned_process(owner):
+            return dict(current, status='exit_failed', detail='代理所有权已变化，请重试退出')
+        if not _shutdown_requested(root):
+            private_write(root / 'shutdown-request.json', dict(request_id=uuid.uuid4().hex,
+                pid=owner['pid'], process_identity=owner['process_identity']))
+        _write_status(root, status='shutting_down',
+            detail='正在请求实验保存并停止；不再启动新实验。无原生续训能力的实验将记为中断。')
+        return status(root)
+
+
+def _shutdown_step(root, agent):
+    """Drain only local work; never sync, accept assignments or launch a task."""
+    from .agent import ACTIVE, TERMINAL, _pid_alive, inspect_update_state
+    errors = []
+    lingering = 0
+    deferred = set()
+    for record in agent.records():
+        try:
+            if (record['state'] == 'starting' and record['spec']['backend'] == 'docker'
+                    and record.get('container_name') and not record.get('stop_action')):
+                container = agent._inspect(record)
+                if container and container['State'].get('Status') == 'created':
+                    # No execution happened. Leave its durable start intent for
+                    # next launch instead of stranding an unresumable algorithm.
+                    deferred.add(record['id'])
+                    continue
+            if (record['state'] in TERMINAL and record['spec']['backend'] == 'docker'
+                    and record.get('container_name')):
+                container = agent._inspect(record)
+                state = container['State'] if container else {}
+                if state.get('Running') or state.get('Restarting') or state.get('Paused'):
+                    # A previous supervisor may have stopped before learning the
+                    # real process outcome. Verify ownership through _inspect and
+                    # request a checkpoint without rewriting its historical state.
+                    common.atomic_json(agent._output(record) / 'STOP', {'reason': 'application exiting'})
+                    if record.get('shutdown_stop_at') is None:
+                        agent._save(record, shutdown_stop_at=common.now(), archive_scanned=False)
+                    if common.now() - record['shutdown_stop_at'] >= float(agent.config.get('stop_grace_seconds', 60)):
+                        agent._exec(['docker', 'stop', '--time', '10', record['container_name']], timeout=30)
+                    lingering += 1
+            if record['state'] in ACTIVE:
+                if record.get('exit_requested_attempt') != record['attempt']:
+                    # Local exit does not acknowledge an unseen Hub command.
+                    if record.get('stop_at') is None:
+                        agent._command(record, 'stop', record.get('command_ack', 0))
+                    agent._save(record, exit_requested_attempt=record['attempt'])
+                if record['state'] in ACTIVE:
+                    agent._reconcile(record)
+                agent._metrics(record)
+            if (record.get('exit_requested_attempt') == record['attempt'] and record['state'] == 'paused'
+                    and record.get('ever_started') and record['spec'].get('resume_supported') is False):
+                agent._save(record, state='interrupted',
+                    detail='Stopped for application exit; this algorithm has no configured native resume')
+            # A demo interrupted by an earlier agent may still be flushing its
+            # checkpoint. Only its STOP file is authority; never kill a saved PID.
+            if (record['state'] in TERMINAL and record['spec']['backend'] == 'demo'
+                    and _pid_alive(record.get('worker_pid'))):
+                common.atomic_json(agent._output(record) / 'STOP', {'reason': 'application exiting'})
+                errors.append('演示进程仍在保存并退出，请等待；不会按历史 PID 强制结束进程')
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
+            errors.append(_redact(root, str(error))[:300])
+    records = agent.records()
+    active = sum(record['state'] in ACTIVE and record['id'] not in deferred for record in records) + lingering
+    progress = inspect_update_state(agent.db)
+    progress.update(active_jobs=active,
+        queued_jobs=sum(record['state'] in ('assigned', 'preparing', 'ready') or record['id'] in deferred
+                        for record in records),
+        paused_jobs=sum(record['state'] == 'paused' for record in records),
+        interrupted_jobs=sum(record['state'] == 'interrupted' for record in records))
+    if not active and not errors and (not agent.config.get('allow_demo', False)
+            or any(record['spec']['backend'] == 'docker' for record in records)):
+        try:
+            candidate = _candidate(_settings(root).get('config'))
+            live = _update_containers(candidate, execution_only=True)
+            if live:
+                errors.append(f'{len(live)} 个受管容器仍未退出，请确认实验状态后重试')
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            errors.append(_redact(root, str(error))[:300])
+    detail = (f'正在保存并停止实验：还剩 {active} 个；已暂停 {progress["paused_jobs"]} 个，'
+              f'中断 {progress["interrupted_jobs"]} 个。待回传数据保留在本机，下次启动继续同步。')
+    _write_status(root, status='exit_failed' if errors else 'shutting_down', shutdown=progress,
+                  detail='退出尚未完成：' + '；'.join(errors) if errors else detail)
+    return not active and not errors
+
+
+def _update_containers(candidate, *, execution_only=False):
     """Use exactly the Docker endpoint selected by the service; never stop a container."""
     environment = dict(os.environ)
     endpoint = common.read_json(Path(candidate['path']).parent / 'setup-state.json', {}).get('docker_endpoint')
@@ -266,7 +434,8 @@ def _update_containers(candidate):
         item = json.loads(line)
         if not item.get('ID') or not isinstance(item.get('State'), str):
             raise ValueError('Docker 返回了无法识别的容器状态')
-        if item['State'] != 'exited':
+        inactive = ('created', 'exited', 'dead') if execution_only else ('exited',)
+        if item['State'] not in inactive:
             active.append(item['ID'])
     return active
 
@@ -277,7 +446,9 @@ def update_status(service_root=None):
     result = {'running': False, 'status': 'unknown', 'ready_for_update': False}
     try:
         result.update(status(root))
-        if result.get('status') in ('starting', 'preparing', 'stopping', 'external_running'):
+        if result['running'] and not supports_update_stop(result):
+            return manual_stop_required(result, worker=True)
+        if result.get('status') in ('starting', 'preparing', 'stopping', 'external_running', 'shutting_down', 'exit_failed'):
             return dict(result, ready_for_update=False, detail='代理正在准备、停止或由旧入口运行，请完成后重试')
         if result['running'] and (not result.get('online') or time.time() - result.get('updated_at', 0) > 45):
             return dict(result, ready_for_update=False, detail='代理尚未确认与管理端同步，请恢复连接并等待同步完成')
@@ -312,6 +483,35 @@ def update_status(service_root=None):
         except (OSError, ValueError, TypeError, AttributeError):
             detail = '配置或状态文件无法读取'
         return dict(result, ready_for_update=False, detail='无法核查更新条件：' + detail)
+
+
+def install_status(service_root=None):
+    """Manual installation may preserve queued work once every old process exits."""
+    from .desktop import _lock_is_held
+    root = _root(service_root)
+    result = {'running': False, 'status': 'unknown', 'ready_for_install': False}
+    try:
+        result.update(status(root))
+        if (result['running'] or result['status'] in ('starting', 'preparing', 'stopping', 'shutting_down')
+                or _lock_is_held(root / 'supervisor.lock')):
+            return dict(result, ready_for_install=False,
+                        detail='旧代理或准备进程尚未退出，请完成保存退出后再安装')
+        settings = _settings(root)
+        if not settings.get('config'):
+            return dict(result, ready_for_install=True, detail='没有运行中的旧代理，可以安装')
+        candidate = _candidate(settings['config'])
+        if candidate is None:
+            return dict(result, ready_for_install=False, detail='无法读取原节点配置，不能确认运行中的实验')
+        if agent_is_running(candidate['root']):
+            return dict(result, running=True, ready_for_install=False, detail='原节点代理仍在运行，请先退出')
+        live = _update_containers(candidate, execution_only=True)
+        if live:
+            return dict(result, ready_for_install=False, active_containers=len(live),
+                        detail=f'{len(live)} 个受管容器仍在运行，请先保存并停止实验')
+        return dict(result, ready_for_install=True,
+                    detail='旧代理及实验已退出，可以安装；原实验队列和待回传数据将保留')
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        return dict(result, ready_for_install=False, detail='无法核查安装条件：' + _redact(root, str(error))[:300])
 
 
 def stop_for_update(service_root=None):
@@ -417,7 +617,7 @@ def hold(service_root=None):
             current = status(root)
             if current.get('running'):
                 pass
-            elif current.get('status') in ('starting', 'preparing', 'stopping') and time.monotonic() < grace:
+            elif current.get('status') in ('starting', 'preparing', 'stopping', 'shutting_down') and time.monotonic() < grace:
                 pass
             else:
                 return 0
@@ -432,9 +632,16 @@ def _run_agent(root, config_path):
     previous = None
     try:
         while True:
+            if _shutdown_requested(root):
+                if _shutdown_step(root, agent):
+                    return
+                time.sleep(0.5)
+                continue
             if _update_stop_at_boundary(root, agent):
                 return
-            snapshot = agent.tick()
+            snapshot = agent.tick(stop_requested=lambda: _shutdown_requested(root))
+            if _shutdown_requested(root):
+                continue
             online = bool(snapshot['online'])
             detail = ('Connected to controller / 已连接管理端' if online else
                       'Controller offline; cached tasks continue / 管理端离线，已缓存任务继续')
@@ -454,19 +661,24 @@ def _run_agent(root, config_path):
         agent.close()
 
 
-def serve(service_root=None):
+def serve(service_root=None, *, shutdown_only=False):
     _require_linux()
     root = _root(service_root)
     # Both detached and systemd paths acquire this lock before setting state.
     with InstanceLock(root / 'supervisor.lock'):
         settings = _settings(root)
-        if common.read_json(root / 'status.json', {}).get('stop_requested'):
+        if common.read_json(root / 'status.json', {}).get('stop_requested') and not shutdown_only:
             return 0
         pid = os.getpid()
         identity = _process_identity(pid)
         _write_status(root, status='preparing', detail='Checking installation / 正在准备环境',
                       pid=pid, process_identity=identity, node_id=settings.get('node_id'),
-                      online=False, version=__version__)
+                      online=False, version=__version__, update_stop_protocol=UPDATE_STOP_PROTOCOL,
+                      update_stop_process_identity=identity, shutdown_protocol=SHUTDOWN_PROTOCOL,
+                      shutdown_process_identity=identity)
+        if shutdown_only:
+            private_write(root / 'shutdown-request.json', dict(request_id=uuid.uuid4().hex,
+                pid=pid, process_identity=identity))
         def interrupted(signum, frame):
             raise KeyboardInterrupt
         prior = signal.signal(signal.SIGTERM, interrupted)
@@ -475,7 +687,8 @@ def serve(service_root=None):
             if not config_path.is_file():
                 from .worker_setup import start as setup
                 setup(argparse.Namespace(root=settings['worker_root'], pairing=settings['pairing'],
-                      configure=False, gpu=None, prepare_only=True))
+                      configure=False, gpu=None, prepare_only=True),
+                      cancel_requested=lambda: _shutdown_requested(root))
             config = common.read_json(config_path)
             private_connection(config)
             endpoint = common.read_json(config_path.parent / 'setup-state.json', {}).get('docker_endpoint')
@@ -483,11 +696,22 @@ def serve(service_root=None):
                 os.environ.pop('DOCKER_CONTEXT', None)
                 os.environ['DOCKER_HOST'] = endpoint
             _run_agent(root, str(config_path))
-            _write_status(root, status='stopped', online=False, detail='代理已安全停止，可以安装更新')
+            detail = ('实验已保存或记录为中断，代理已退出；待回传数据保留在本机，下次启动继续同步。'
+                      if _shutdown_requested(root) else '代理已安全停止，可以安装更新')
+            _write_status(root, status='stopped', online=False, detail=detail)
         except KeyboardInterrupt:
-            _write_status(root, status='stopped', online=False,
-                detail='Agent stopped; Docker experiments keep running / 代理已停止，Docker 实验继续运行')
+            if _shutdown_requested(root):
+                _write_status(root, status='exit_failed', online=False,
+                              detail='保存退出过程被外部停止打断，尚未确认实验全部退出；请重试保存退出')
+            else:
+                _write_status(root, status='stopped', online=False,
+                    detail='Agent stopped; Docker experiments keep running / 代理已停止，Docker 实验继续运行')
         except Exception as error:
+            from .worker_setup import SetupCancelled
+            if isinstance(error, SetupCancelled) and _shutdown_requested(root):
+                _write_status(root, status='stopped', online=False,
+                              detail='环境准备已取消，本服务启动的准备子进程已退出；已下载镜像层保留')
+                return 0
             detail = _redact(root, str(error))
             print('Worker error / 算力端错误: ' + detail, flush=True)
             _write_status(root, status='failed', online=False, detail=detail)
@@ -614,7 +838,8 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
-                                         'update-status', 'stop-for-update'))
+                                         'update-status', 'stop-for-update', 'install-status', 'shutdown'))
+    parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')
     parser.add_argument('--root', help='Worker data directory; separate from lifecycle settings')
     parser.add_argument('--config', help='Reuse this existing node configuration without changing it')
@@ -626,7 +851,7 @@ def main(argv=None):
     try:
         _check_release_role()
         if args.action == '_serve':
-            return serve(args.service_root)
+            return serve(args.service_root, shutdown_only=args.shutdown_only)
         if args.action == '_hold':
             return hold(args.service_root)
         if args.action in ('start', 'install'):

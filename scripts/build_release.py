@@ -44,6 +44,8 @@ def application_files(root=ROOT):
         files[name] = (root / name).read_bytes()
     files['expman/static/favicon.ico'] = (root / 'expman/static/favicon.ico').read_bytes()
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
+    release_notes = 'docs/RELEASE-' + VERSION + '.md'
+    files[release_notes] = (root / release_notes).read_bytes()
     for name in ('examples/managed-project/train.py', 'examples/managed-project/expman_entry.py',
                  'examples/managed-project/check_local.py', 'examples/managed-project/example-data/train.csv',
                  'examples/sasrec-adaptation/managed_sasrec.py', 'examples/sasrec-adaptation/check_lesson.py'):

@@ -9,6 +9,7 @@ import base64
 import copy
 import csv
 import ctypes
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -27,6 +28,29 @@ from . import common, scheduler
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
+
+
+def _new_timing(complete=True):
+    return {"started_at": None, "finished_at": None, "elapsed_seconds": 0.0,
+            "segment_started_at": None, "last_observed_at": None, "complete": complete}
+
+
+def _docker_timestamp(value):
+    """Docker uses an all-zero date for containers that have never run."""
+    if not isinstance(value, str) or value.startswith("0001-"):
+        return None
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})", value)
+    if match is None:
+        return None
+    whole, fraction, offset = match.groups()
+    # Python 3.10 accepts only three or six fractional digits, while Docker
+    # emits RFC3339Nano timestamps with up to nine. Preserve timezone offsets.
+    value = whole + ("." + fraction.ljust(6, "0")[:6] if fraction else "") + offset
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.timestamp() if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def inspect_update_state(db):
@@ -169,7 +193,8 @@ class Agent:
             if record["state"] in ACTIVE and record["spec"]["backend"] == "demo":
                 # A recorded PID is never authority to kill an unknown process.
                 common.atomic_json(self._output(record) / "STOP", {"reason": "agent restarted"})
-                self._save(record, state="interrupted", detail="Agent restarted; demo is not launched again automatically")
+                self._save(record, state="interrupted", _timing_uncertain=True,
+                           detail="Agent restarted; demo is not launched again automatically")
 
     def close(self):
         if self.closed:
@@ -212,10 +237,38 @@ class Agent:
     def records(self):
         return [json.loads(row[0]) for row in self.db.execute("SELECT record FROM tasks ORDER BY id")]
 
-    def _save(self, record, **changes):
+    def _save(self, record, *, _timing_end=None, _timing_uncertain=False, **changes):
+        timestamp = common.now()
+        timing = record.get("_timing")
+        state = changes.get("state", record["state"])
+        if timing is not None:
+            previous = timing.get("last_observed_at")
+            if previous is not None and timestamp < previous:
+                timing["complete"] = False
+            if record["state"] in TERMINAL and state not in TERMINAL:
+                timing["finished_at"] = None
+            segment = timing["segment_started_at"]
+            if state == "running" and segment is None:
+                timing["segment_started_at"] = timestamp
+                if timing["started_at"] is None:
+                    timing["started_at"] = timestamp
+                    timing["first_attempt"] = record["attempt"]
+            elif state != "running" and segment is not None:
+                ended = _timing_end if _timing_end is not None else timestamp
+                if _timing_uncertain:
+                    # A restart/missing process cannot establish when it stopped.
+                    ended = previous if previous is not None else segment
+                if ended < segment:
+                    timing["complete"] = False
+                timing["elapsed_seconds"] += max(0.0, ended - segment)
+                timing["segment_started_at"] = None
+                timing["finished_at"] = None if _timing_uncertain else ended
+            if _timing_uncertain:
+                timing["complete"] = False
+            timing["last_observed_at"] = timestamp
         record.update(changes)
         record["seq"] = record.get("seq", 0) + 1
-        record["updated"] = common.now()
+        record["updated"] = timestamp
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO tasks VALUES (?,?)", (
                 record["id"], json.dumps(record, ensure_ascii=False, allow_nan=False)))
@@ -315,9 +368,26 @@ class Agent:
             ("attempt", 1), ("metrics", {}), ("command_ack", 0), ("log_tail", ""))}
         # The server limit is bytes, not characters (Chinese logs can use 3 bytes/character).
         report["log_tail"] = report["log_tail"].encode("utf-8")[-16000:].decode("utf-8", errors="ignore")
+        timing = record.get("_timing")
+        if timing is not None:
+            timestamp = common.now()
+            segment = timing["segment_started_at"]
+            report["timing"] = {
+                "started_at": timing["started_at"], "finished_at": timing["finished_at"],
+                "elapsed_seconds": timing["elapsed_seconds"] +
+                    (max(0.0, timestamp - segment) if segment is not None else 0.0),
+                "observed_at": timestamp,
+                "complete": timing["complete"] and
+                    (timing["last_observed_at"] is None or timestamp >= timing["last_observed_at"]),
+            }
         return report
 
     def _sync(self, snapshot):
+        # Timing advances even when a workload has not emitted fresh metrics.
+        # Persist a fresh sequence so the Hub can accept each duration sample.
+        for record in self.records():
+            if record["state"] == "running" and "_timing" in record:
+                self._save(record)
         confirmed = dict(self.db.execute("SELECT job_id,seq FROM report_acks"))
         pending = [record for record in self.records() if record["seq"] > confirmed.get(record["id"], 0)]
         # Older unsent reports are drained before newly updated active jobs.
@@ -359,7 +429,8 @@ class Agent:
                 if record is None:
                     spec = common.validate_task(job["spec"])
                     record = {"id": job["id"], "spec": spec, "state": "assigned", "attempt": 1,
-                              "seq": 0, "command_ack": 0, "prepared": False, "metrics": {}}
+                              "seq": 0, "command_ack": 0, "prepared": False, "metrics": {},
+                              "_timing": _new_timing()}
                     self._save(record, detail="Persisted on assigned node")
                     existing[record["id"]] = record
                 elif record["spec"] != common.validate_task(job["spec"]):
@@ -526,10 +597,14 @@ class Agent:
                 "EXPERIMENT_RESUME": "1" if record.get("resume_from_checkpoint") else "0",
                 "EXPERIMENT_AGENT_PID": str(os.getpid()), "EXPERIMENT_ATTEMPT": str(record["attempt"])}
 
-    def _start(self, record, choice):
+    def _start(self, record, choice, stop_requested=None):
         spec, output = record["spec"], self._output(record)
+        if stop_requested is not None and stop_requested():
+            return
         if spec["backend"] == "docker" and sys.platform != "linux":
             raise ValueError("Docker tasks must run inside WSL2 or Ubuntu, not native Windows")
+        # An upgraded node can measure future attempts, but cannot invent history.
+        record.setdefault("_timing", _new_timing(complete=False))
         # Intent is durable before a create/spawn side effect.
         self._save(record, state="starting", gpu_uuid=choice["gpu_uuid"], environment=choice["environment"],
                    container_name=f"expman-{record['id']}-{record['attempt']}", detail="Start intent persisted")
@@ -543,6 +618,9 @@ class Agent:
             package_root = str(Path(__file__).resolve().parent.parent)
             environment["PYTHONPATH"] = package_root + os.pathsep + environment.get("PYTHONPATH", "")
             common.atomic_json(output / f"execution-attempt-{record['attempt']}.json", execution)
+            if stop_requested is not None and stop_requested():
+                self._save(record, state="ready", container_name=None, detail="Start deferred for application exit")
+                return
             self._save(record, ever_started=True)
             with open(output / f"attempt-{record['attempt']}.log", "ab") as log:
                 process = subprocess.Popen([sys.executable, "-m", "expman.demo_workload"],
@@ -595,7 +673,12 @@ class Agent:
                            "CUDA_VISIBLE_DEVICES": choice["gpu_uuid"]}.items():
             argv += ["--env", key + "=" + value]
         argv += [environment["image"], *spec["command"]]
+        if stop_requested is not None and stop_requested():
+            self._save(record, state="ready", container_name=None, detail="Start deferred for application exit")
+            return
         self._exec(argv, timeout=60)
+        if stop_requested is not None and stop_requested():
+            return  # Keep the owned, unstarted container for recovery on next launch.
         self._save(record, ever_started=True)
         self._exec(["docker", "start", record["container_name"]], timeout=60)
         self._save(record, state="running", detail="Docker container running")
@@ -614,7 +697,7 @@ class Agent:
             raise ValueError("Container ownership labels do not match; refusing to control it")
         return container
 
-    def _finish(self, record, exit_code):
+    def _finish(self, record, exit_code, finished_at=None):
         action = record.get("stop_action")
         if action == "cancel":
             state = "canceled"
@@ -622,10 +705,23 @@ class Agent:
             state = "paused" if self._checkpoint(record) else "interrupted"
         else:
             state = "succeeded" if exit_code == 0 else "failed"
-        self._save(record, state=state, exit_code=exit_code, archive_scanned=False,
+        self._save(record, state=state, exit_code=exit_code, archive_scanned=False, _timing_end=finished_at,
                    detail=f"Process exited with code {exit_code}" + ("; checkpoint verified" if state == "paused" else ""))
 
-    def _reconcile(self, record):
+    def _docker_timing(self, record, state):
+        """Recover the current attempt from Docker, including an unobserved exit."""
+        started = _docker_timestamp(state.get("StartedAt"))
+        finished = _docker_timestamp(state.get("FinishedAt"))
+        if started is None:
+            return finished
+        timing = record.setdefault("_timing", _new_timing(complete=False))
+        timing["segment_started_at"] = started
+        if timing["started_at"] is None or timing.get("first_attempt") == record["attempt"]:
+            timing["started_at"] = started
+            timing["first_attempt"] = record["attempt"]
+        return finished
+
+    def _reconcile(self, record, stop_requested=None):
         if record["state"] not in ACTIVE:
             return
         timeout = float(self.config.get("stop_grace_seconds", 60))
@@ -633,7 +729,8 @@ class Agent:
         if record["spec"]["backend"] == "demo":
             process = self.processes.get(record["id"])
             if process is None:
-                self._save(record, state="interrupted", detail="Demo process handle unavailable; not relaunched")
+                self._save(record, state="interrupted", _timing_uncertain=True,
+                           detail="Demo process handle unavailable; not relaunched")
                 return
             code = process.poll()
             if code is None and overdue:
@@ -649,9 +746,11 @@ class Agent:
             return
         container = self._inspect(record)
         if container is None:
-            self._save(record, state="interrupted", detail="Container missing; explicit resume required, no duplicate launch")
+            self._save(record, state="interrupted", _timing_uncertain=True,
+                       detail="Container missing; explicit resume required, no duplicate launch")
             return
         state = container["State"]
+        finished_at = self._docker_timing(record, state)
         if state.get("Status") == "created" and record["state"] == "starting":
             if record.get("stop_at"):
                 self._finish(record, 143)
@@ -665,20 +764,29 @@ class Agent:
             choice = scheduler.select_device(admission_spec, fresh, active)
             if choice is None:
                 return  # A recovered container is still subject to current admission policy.
+            if stop_requested is not None and stop_requested():
+                return
             self._save(record, ever_started=True)
             self._exec(["docker", "start", record["container_name"]], timeout=60)
             self._save(record, state="running", detail="Recovered existing created container")
         elif state.get("Running"):
+            # Recovery can find a live process while the durable intent still
+            # says starting. Enter running before any stop/metrics persistence
+            # so this execution segment is closed only after confirmed exit.
+            if record["state"] != "running":
+                self._save(record, state="running", detail="Reattached to existing container")
+            elif "_timing" in record:
+                self._save(record)
             if overdue:
                 self._exec(["docker", "stop", "--time", "10", record["container_name"]], timeout=30)
-            elif record["state"] != "running":
-                self._save(record, state="running", detail="Reattached to existing container")
         elif state.get("Status") in ("exited", "dead"):
             # Docker retains logs; snapshot them only once the container is closed.
             with open(self._output(record) / f"attempt-{record['attempt']}.log", "wb") as log:
                 subprocess.run(["docker", "logs", record["container_name"]], stdout=log, stderr=subprocess.STDOUT,
                                stdin=subprocess.DEVNULL, timeout=30, shell=False)
-            self._finish(record, state.get("ExitCode", 1))
+            if finished_at is None and "_timing" in record:
+                record["_timing"]["complete"] = False
+            self._finish(record, state.get("ExitCode", 1), finished_at=finished_at)
 
     def _metrics(self, record):
         try:
@@ -775,26 +883,49 @@ class Agent:
                 self.last_error = "Archive sync deferred: " + str(error)[:500]
                 return
 
-    def tick(self):
+    def tick(self, stop_requested=None):
         """One durable cycle; losing Hub connectivity never abandons local ownership."""
+        def exiting():
+            return stop_requested is not None and stop_requested()
+
+        def result():
+            return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error}
+
+        if exiting():
+            return result()
         self._poll_preparation()
         for record in self.records():
+            if exiting():
+                return result()
             try:
-                self._reconcile(record)
+                if stop_requested is None:
+                    self._reconcile(record)
+                else:
+                    self._reconcile(record, stop_requested=stop_requested)
                 self._metrics(record)
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
                 self.last_error = str(error)[:1000]
+        if exiting():
+            return result()
         snapshot = self.snapshot()
+        if exiting():
+            return result()
         self._sync(snapshot)
+        if exiting():
+            return result()
         if self.mode == "drain":
             snapshot["policy"]["run_enabled"] = False
         for record in self.records():
+            if exiting():
+                return result()
             if record["state"] in ("assigned", "preparing"):
                 try:
                     self._prepare(record, snapshot)
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
                     self._save(record, state="failed", detail="Preparation failed: " + str(error)[:1000])
         for record in sorted(self.records(), key=lambda item: -item["spec"]["priority"]):
+            if exiting():
+                return result()
             if record["state"] != "ready":
                 continue
             # Refresh telemetry immediately before each start, not just at heartbeat.
@@ -802,9 +933,14 @@ class Agent:
             active = [{"spec": task["spec"], "gpu_uuid": task.get("gpu_uuid")}
                       for task in self.records() if task["state"] in ACTIVE]
             choice = scheduler.select_device(record["spec"], fresh, active)
+            if exiting():
+                return result()
             if choice is not None:
                 try:
-                    self._start(record, choice)
+                    if stop_requested is None:
+                        self._start(record, choice)
+                    else:
+                        self._start(record, choice, stop_requested=stop_requested)
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
                     # If Docker create/start ACK was lost, keep persisted intent and inspect next tick.
                     if record["spec"]["backend"] == "docker" and record["state"] == "starting":
@@ -818,7 +954,7 @@ class Agent:
                 self.last_error = "Archive snapshot deferred: " + str(error)[:500]
         self._uploads()
         self.project_delivery.tick()
-        return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error}
+        return result()
 
 
 def run(config_path, once=False):

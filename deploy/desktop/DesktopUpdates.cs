@@ -9,9 +9,57 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
 namespace ExperimentManagerDesktop {
+    internal static class DesktopLifecycle {
+        internal static bool CanExitUnconfiguredWorker(string configuredDistribution,IEnumerable<string> registeredDistributions) {
+            if(!String.IsNullOrWhiteSpace(configuredDistribution)||registeredDistributions==null)return false;
+            foreach(string name in registeredDistributions)
+                if(String.IsNullOrWhiteSpace(name)||!name.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase))return false;
+            return true;
+        }
+
+        internal static void RequireInstallReady(Dictionary<string,object> state,bool worker) {
+            object running,ready;
+            if(state.TryGetValue("running",out running)&&running is bool&&!(bool)running&&
+                    state.TryGetValue("ready_for_install",out ready)&&ready is bool&&(bool)ready)return;
+            string detail=state.ContainsKey("detail")?Convert.ToString(state["detail"]):"无法确认旧后台已安全停止。";
+            throw new InvalidOperationException(detail+"\n"+(worker?
+                "请先保存并停止实验，再停止旧代理并从托盘退出，然后重试安装。待回传数据会保留。":
+                "请在旧实验台的“状态与日志”窗口点击“停止主控”，再从托盘退出并重试安装。")+
+                " 新版本不会直接连接仍在运行的旧后台。");
+        }
+
+        // A missing flag or a transient service state is not proof that the
+        // process has exited. Both normal exit and update handoff use this.
+        internal static async Task WaitForStopped(Func<Task<Dictionary<string,object>>> readStatus,
+                Action<Dictionary<string,object>> progress, TimeSpan? timeout, Func<Task> delay = null, string finalStatus = null) {
+            var timer = Stopwatch.StartNew();
+            while(true) {
+                var state = await readStatus();
+                if(progress != null) progress(state);
+                object raw;
+                if(!state.TryGetValue("running", out raw) || !(raw is bool))
+                    throw new InvalidDataException("后台未返回有效的退出状态，客户端将保留以便重试。");
+                string status = state.ContainsKey("status") ? Convert.ToString(state["status"]) : "";
+                if(status == "exit_failed")
+                    throw new IOException(state.ContainsKey("detail") ? Convert.ToString(state["detail"]) : "后台退出失败，请重试。");
+                bool pending = status == "starting" || status == "preparing" || status == "stopping" ||
+                    status == "shutting_down" || status == "unknown" || status.Length == 0;
+                if(!(bool)raw && !pending) {
+                    if(finalStatus == null || status == finalStatus)return;
+                    throw new IOException(state.ContainsKey("detail") ? Convert.ToString(state["detail"]) :
+                        "后台已中断，但尚未确认实验保存停止，客户端将保留以便重试。");
+                }
+                if(timeout.HasValue && timer.Elapsed >= timeout.Value)
+                    throw new IOException("后台仍在退出，客户端已保留，请稍后重试。");
+                if(delay == null) await Task.Delay(500); else await delay();
+            }
+        }
+    }
+
     internal sealed class UpdateRelease {
         internal string Version, Tag, ReleaseUrl, Notes, AssetName, AssetUrl, ChecksumUrl, Sha256;
         internal long Size;
@@ -133,6 +181,15 @@ namespace ExperimentManagerDesktop {
         }
 
         internal static int CompareVersions(string left, string right) { return Compare(ParseVersion(left), ParseVersion(right)); }
+
+        internal static bool BackendMatchesRelease(string backendVersion,string releaseVersion) {
+            if(String.IsNullOrWhiteSpace(backendVersion))return false;
+            // Python exposes the historical PEP 440 spelling (0.3.0rc4);
+            // release assets and the desktop use SemVer (0.3.0-rc.4).
+            string normalized=Regex.Replace(backendVersion,@"^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$","$1-rc.$2",RegexOptions.CultureInvariant);
+            try {return CompareVersions(normalized,releaseVersion)==0;}
+            catch(FormatException){return false;}
+        }
 
         // Kept separate from HTTP so truncation, cancellation and atomic finalization can
         // be checked against deterministic streams without network or installation.

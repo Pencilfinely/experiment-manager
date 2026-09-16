@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.3.0-rc.3
+        default: v0.3.0-rc.4
 permissions:
   contents: write
 env:
@@ -26,6 +26,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: python -c "import os; from scripts.build_release import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION"
       - run: python -m unittest discover -s tests -t . -v
+      - run: node tests/test_timing_ui.js
       - name: Validate native desktop and updater
         shell: pwsh
         run: |

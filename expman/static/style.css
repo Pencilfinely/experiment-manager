@@ -23,3 +23,17 @@
 }
 @media(max-width:760px){.sidebar-toggle{display:none}}
 @media(prefers-reduced-motion:reduce){.sidebar,.app-shell{transition:none}}
+
+/* Experiment durations use stable digits while the live clock advances. */
+.experiment-timer{display:inline-flex;flex-direction:column;gap:5px;white-space:nowrap}
+.timer-value{font-variant-numeric:tabular-nums;font-weight:600;color:#355548}
+.experiment-timer .timer-note{font-size:10px;color:var(--muted);margin:0;font-weight:400}
+.timer-live .timer-value{color:var(--green)}
+.experiment-timing{display:grid;grid-template-columns:1.1fr repeat(3,1fr);gap:20px;padding:20px;background:#f5f8f4;border:1px solid var(--line);border-radius:10px;margin:20px 0 10px}
+.experiment-timing>div{min-width:0}
+.experiment-timing dt{font-size:11px;color:var(--muted);margin-bottom:10px}
+.experiment-timing dd{font-size:12px;margin:0;line-height:1.6;overflow-wrap:anywhere}
+.timing-primary .timer-value{font-size:22px;line-height:1.1}
+.recent-job-status{display:flex;align-items:center;gap:20px;flex-shrink:0;text-align:right}
+@media(max-width:1150px){.experiment-timing{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.recent-job-status{flex-direction:column;align-items:flex-end;gap:8px}.experiment-timing{gap:18px 12px;padding:16px}.timing-primary .timer-value{font-size:19px}}

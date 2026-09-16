@@ -151,6 +151,31 @@ namespace ExperimentManagerDesktop {
             catch(System.ComponentModel.Win32Exception) { return false; }
         }
 
+        internal void CloseOwnedWindows() {
+            lock(gate) {
+                if(disposed)return;
+                nextDiscovery=DateTime.MinValue;Refresh();
+                RequestCloseTrackedWindows();
+            }
+            var deadline=DateTime.UtcNow.AddSeconds(10);
+            while(true) {
+                bool remaining=false;
+                lock(gate)foreach(var window in windows)if(StillOwnsWindow(window.Key,window.Value)){remaining=true;break;}
+                if(!remaining)return;
+                if(DateTime.UtcNow>=deadline)throw new InvalidOperationException("实验台窗口仍在关闭，请确认窗口中的提示后重试退出。");
+                Thread.Sleep(100);
+            }
+        }
+
+        void RequestCloseTrackedWindows() {
+            // Close only windows discovered through the exact executable,
+            // dedicated profile and process-start identity checks above.
+            // Never terminate Edge or affect the user's ordinary profile.
+            foreach(var window in windows)if(StillOwnsWindow(window.Key,window.Value))
+                if(!PostMessageW(window.Key,0x10,IntPtr.Zero,IntPtr.Zero))
+                    throw new InvalidOperationException("无法关闭实验台窗口，请关闭该窗口后重试退出。");
+        }
+
         public void Dispose() {
             lock(gate) {
                 if(disposed)return;disposed=true;timer.Dispose();
@@ -171,6 +196,7 @@ namespace ExperimentManagerDesktop {
         [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window,uint command);
         [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr window,StringBuilder name,int maximum);
         [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool PostMessageW(IntPtr window,uint message,IntPtr wParam,IntPtr lParam);
         [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);
         [DllImport("shell32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CommandLineToArgvW(string commandLine,out int argumentCount);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);

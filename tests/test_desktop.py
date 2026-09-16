@@ -44,7 +44,7 @@ class DesktopTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             status = desktop.controller_status(self.root)
-            if status["running"]:
+            if status.get("responsive"):
                 self.nonce = common.read_json(self.root / "desktop-process.json")["nonce"]
                 return status
             if self.errors:
@@ -56,6 +56,7 @@ class DesktopTests(unittest.TestCase):
         status = self.serve()
         self.assertGreater(status["port"], 0)
         self.assertTrue(status["managed"])
+        self.assertTrue(status["responsive"])
         settings = common.read_json(self.root / "launcher.json")
         self.assertEqual(status["port"], settings["port"])
         url = "http://127.0.0.1:" + str(status["port"]) + "/api/state"
@@ -90,9 +91,129 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(reopened["running"])
         self.assertEqual(common.read_json(self.root / "hub.json"), before)
 
+    def test_http_failure_keeps_live_controller_running_and_allows_owned_stop(self):
+        self.serve()
+        with patch("expman.desktop.urllib.request.build_opener") as opener, \
+                patch("expman.desktop.subprocess.Popen") as start:
+            opener.return_value.open.side_effect = OSError("temporarily unreachable")
+            status = desktop.controller_status(self.root)
+            self.assertTrue(status["running"])
+            self.assertFalse(status["responsive"])
+            self.assertEqual(status["status"], "unresponsive")
+            self.assertTrue(desktop.controller_start(self.root)["running"])
+            start.assert_not_called()
+            self.assertEqual(desktop.controller_stop(self.root)["status"], "stopping")
+            self.assertEqual(common.read_json(self.root / "desktop-stop.json")["nonce"], self.nonce)
+            self.thread.join(4)
+            self.assertFalse(self.thread.is_alive())
+            self.assertFalse(desktop.controller_status(self.root)["running"])
+        self.assertEqual(self.errors, [])
+
+    def test_live_controller_with_invalid_health_response_blocks_update(self):
+        self.serve()
+        for invalid in (b'null', b'[]', b'{}', b'{"nodes":{},"jobs":[]}'):
+            with self.subTest(invalid=invalid), patch("expman.desktop.urllib.request.build_opener") as opener:
+                opener.return_value.open.side_effect = lambda *args, **kwargs: io.BytesIO(invalid)
+                status = desktop.controller_status(self.root)
+                self.assertTrue(status["running"])
+                self.assertFalse(status["responsive"])
+                inspected = desktop.controller_stop_for_update(self.root)
+                self.assertTrue(inspected["running"])
+                self.assertFalse(inspected["ready_for_update"])
+                self.assertEqual(inspected["status"], "unknown")
+                self.assertNotIn("manual_stop_required", inspected)
+        self.assertFalse((self.root / "desktop-update-request.json").exists())
+
+    def test_held_lifecycle_lock_means_running_before_owner_and_http_start(self):
+        with desktop.InstanceLock(self.root / "controller.lock"), \
+                patch("expman.desktop.subprocess.Popen") as start:
+            status = desktop.controller_status(self.root)
+            self.assertTrue(status["running"])
+            self.assertFalse(status["responsive"])
+            self.assertFalse(status["managed"])
+            self.assertTrue(desktop.controller_start(self.root)["running"])
+            start.assert_not_called()
+            self.assertFalse(desktop.controller_update_status(self.root)["ready_for_update"])
+        self.assertFalse(desktop.controller_status(self.root)["running"])
+
+    def test_shutdown_remains_running_until_controller_lock_is_released(self):
+        common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
+        common.atomic_json(self.root / "desktop-process.json", {"nonce": "stopping-owner"})
+        with patch("expman.desktop.urllib.request.build_opener") as opener:
+            opener.return_value.open.side_effect = OSError("listener already closed")
+            with desktop.InstanceLock(self.root / "controller.lock"):
+                self.assertTrue(desktop.controller_status(self.root)["running"])
+                self.assertFalse(desktop.controller_update_status(self.root)["ready_for_update"])
+            # A stale owner file is not proof of a live process after lock release.
+            self.assertFalse(desktop.controller_status(self.root)["running"])
+
+    def test_manual_install_checks_only_stopped_local_controller(self):
+        hub = Hub(self.root)
+        try:
+            hub.add_node("offline-worker")
+            hub.db.execute("INSERT INTO jobs(id,spec,state,node_id,created,updated) "
+                           "VALUES (?,'{}','succeeded','offline-worker',0,0)", ("a" * 32,))
+        finally:
+            hub.close()
+        database = (self.root / "hub.sqlite3").read_bytes()
+        identity = (self.root / "hub.json").read_bytes()
+        self.assertFalse(desktop.controller_update_status(self.root)["ready_for_update"])
+        self.assertTrue(desktop.controller_install_status(self.root)["ready_for_install"])
+        self.assertEqual((self.root / "hub.sqlite3").read_bytes(), database)
+        self.assertEqual((self.root / "hub.json").read_bytes(), identity)
+
+    def test_manual_install_blocks_live_controller_start_locks_and_pending(self):
+        for name in ("controller.lock", "desktop-start.lock"):
+            with self.subTest(name=name), desktop.InstanceLock(self.root / name):
+                result = desktop.controller_install_status(self.root)
+                self.assertFalse(result["ready_for_install"])
+        common.atomic_json(self.root / "desktop-pending.json", {"started": time.time()})
+        result = desktop.controller_install_status(self.root)
+        self.assertFalse(result["ready_for_install"])
+        self.assertEqual(result["status"], "starting")
+        common.atomic_json(self.root / "desktop-pending.json", {"started": time.time() - 30})
+        self.assertTrue(desktop.controller_install_status(self.root)["ready_for_install"])
+
+    def test_manual_install_requires_port_closed_after_failed_health_check(self):
+        common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
+        common.atomic_json(self.root / "launcher.json", {"port": 18765})
+        with patch("expman.desktop.urllib.request.build_opener") as opener:
+            opener.return_value.open.side_effect = OSError("unhealthy HTTP")
+            with patch("expman.desktop.socket.create_connection") as connect:
+                result = desktop.controller_install_status(self.root)
+                self.assertTrue(result["running"])
+                self.assertFalse(result["ready_for_install"])
+                connect.return_value.close.assert_called_once()
+                connect.side_effect = ConnectionRefusedError()
+                result = desktop.controller_install_status(self.root)
+                self.assertFalse(result["running"])
+                self.assertTrue(result["ready_for_install"])
+                connect.side_effect = TimeoutError("port probe timed out")
+                self.assertFalse(desktop.controller_install_status(self.root)["ready_for_install"])
+
+    def test_manual_install_new_directory_and_invalid_local_state(self):
+        self.assertTrue(desktop.controller_install_status(self.root)["ready_for_install"])
+        self.assertFalse(self.root.exists())
+        for invalid in ([], {}, {"started": "unknown"}):
+            with self.subTest(invalid=invalid):
+                common.atomic_json(self.root / "desktop-pending.json", invalid)
+                self.assertFalse(desktop.controller_install_status(self.root)["ready_for_install"])
+        (self.root / "desktop-pending.json").write_text("{broken", encoding="utf-8")
+        self.assertFalse(desktop.controller_install_status(self.root)["ready_for_install"])
+
+    def test_install_status_cli_is_available_without_creating_controller_data(self):
+        with patch("sys.argv", ["desktop", "controller-install-status", "--root", str(self.root)]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            desktop.main()
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ready_for_install"])
+        self.assertFalse(result["running"])
+        self.assertFalse(self.root.exists())
+
     def test_update_status_and_cooperative_stop_leave_controller_data_intact(self):
         self.serve()
         identity = common.read_json(self.root / 'hub.json')
+        self.assertEqual(desktop.controller_status(self.root)['update_stop_protocol'], 1)
         self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
         result = desktop.controller_stop_for_update(self.root)
         self.assertTrue(result['ready_for_update'])
@@ -103,6 +224,32 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(desktop.controller_status(self.root)['running'])
         self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
         self.assertEqual(common.read_json(self.root / 'hub.json'), identity)
+
+    def test_unmarked_rc2_and_rc3_controllers_still_complete_cooperative_stop(self):
+        for version in ('0.3.0rc2', '0.3.0rc3'):
+            with self.subTest(version=version):
+                self.serve()
+                owner = common.read_json(self.root / 'desktop-process.json')
+                owner.pop('update_stop_protocol')
+                common.atomic_json(self.root / 'desktop-process.json', owner)
+                status = dict(desktop.controller_status(self.root), version=version)
+                self.assertNotIn('update_stop_protocol', status)
+                with patch.object(desktop, 'controller_status', return_value=status):
+                    result = desktop.controller_stop_for_update(self.root)
+                self.assertTrue(result['ready_for_update'])
+                self.thread.join(4)
+                self.assertFalse(self.thread.is_alive())
+                self.assertEqual(self.errors, [])
+
+    def test_status_ignores_owner_capability_for_a_different_backend_version(self):
+        common.atomic_json(self.root / 'hub.json', {'admin_token': 'test-only-token'})
+        common.atomic_json(self.root / 'launcher.json', {'port': 8765})
+        common.atomic_json(self.root / 'desktop-process.json',
+                           {'nonce': 'stale-owner', 'version': '0.3.0rc3', 'update_stop_protocol': 1})
+        with patch.object(desktop.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"version":"0.3.0rc1","nodes":[],"jobs":[]}')
+            status = desktop.controller_status(self.root)
+        self.assertNotIn('update_stop_protocol', status)
 
     def test_status_refreshes_owner_published_while_health_probe_waits(self):
         common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})

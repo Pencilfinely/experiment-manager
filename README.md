@@ -5,8 +5,8 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.3.0-rc.3 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-This version adds checking, downloading and installing updates in both Windows applications, plus distinct Center and Worker icons. Updates start when you request them; unattended background upgrades are not included.
+**0.3.0-rc.4 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+This version adds cumulative experiment timing, clearer update diagnostics and tray exit that stops the associated service. Updates start when you request them.
 
 ## Download and install
 
@@ -73,6 +73,8 @@ Publish a project once and let selected workers receive it. Current distribution
 
 Each experiment has its own configuration and output directory. Console output is saved, existing log files can be configured as metric sources, and models/results return with the experiment.
 Task completion and file upload completion may occur at different times. Check pending uploads before shutting down.
+
+The overview, experiment list and details show **cumulative runtime**. Timing starts with execution, freezes when it stops, and accumulates across resumed attempts; queueing, preparation and stopped periods are excluded. Workers persist timing, so closing the page or losing the controller connection does not reset it. Live values are estimates until confirmed by the worker. Details show submission, first start and latest stop times; CSV exports include timing fields. Update both Center and Worker for complete timing support. Old records remain unavailable, and uncertain history is marked incomplete.
 
 The Windows worker can continue after its window closes, but still depends on the current user's WSL and Docker Desktop.
 **Background operation does not mean training continues through sleep, logout or power-off.** Optional login startup is not a Windows service running without user login.

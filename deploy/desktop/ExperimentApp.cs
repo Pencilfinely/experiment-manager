@@ -45,6 +45,13 @@ namespace ExperimentManagerDesktop {
             File.WriteAllText(tmp, Json.Serialize(value), new UTF8Encoding(false));
             if(File.Exists(path)) File.Replace(tmp,path,null); else File.Move(tmp,path);
         }
+        internal static void UpdateReport(string stage,string status,string detail="") {
+            // A failure after the old client exits must remain diagnosable.
+            // Logging must not prevent installation or hide its original error.
+            try { Write(Path.Combine(SettingsRoot,"last-update.json"),new {
+                time=DateTime.UtcNow.ToString("o"),role=Role,version=Version,stage=stage,status=status,detail=detail }); }
+            catch(IOException) { } catch(UnauthorizedAccessException) { }
+        }
         internal static string Quote(string value) {
             // WSL parses leading options itself: leave simple flags unquoted.
             if(value.Length>0&&value.IndexOfAny(new[]{' ','\t','\r','\n','"'})<0)return value;
@@ -85,6 +92,20 @@ namespace ExperimentManagerDesktop {
             return value;
         }
         internal static void OpenFile(string path) { if(File.Exists(path)||Directory.Exists(path)) Process.Start(new ProcessStartInfo(path){UseShellExecute=true}); }
+        internal static string[] RegisteredDistributions() {
+            // WSL and Windows Terminal enumerate this per-user registration
+            // store; it remains readable when wsl.exe has not been installed.
+            var names=new List<string>();
+            using(var registry=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss")) {
+                if(registry==null)return names.ToArray();
+                foreach(string child in registry.GetSubKeyNames())using(var distribution=registry.OpenSubKey(child)) {
+                    string name=distribution==null?null:distribution.GetValue("DistributionName") as string;
+                    if(String.IsNullOrWhiteSpace(name))throw new IOException("无法确认 WSL 发行版状态，请检查原算力环境后重试退出。");
+                    names.Add(name);
+                }
+            }
+            return names.ToArray();
+        }
         internal static void Shortcut(string destination, string target, string arguments) {
             Directory.CreateDirectory(Path.GetDirectoryName(destination));
             Type type=Type.GetTypeFromProgID("WScript.Shell"); dynamic shell=Activator.CreateInstance(type);
@@ -126,6 +147,7 @@ namespace ExperimentManagerDesktop {
                     File.WriteAllText(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-test.json"), Json.Serialize(new { role=Role, version=Version, executable=Executable, status="passed",payload_files=payloadFiles,icon_sha256=iconHash,runtime_icon_sizes=runtimeIconSizes })); return;
                 }
                 using(var payload=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppPayload")) if(payload!=null) {
+                    if(Has(args,"--apply-update"))UpdateReport("waiting_for_previous_client","running");
                     WaitForPreviousClient(args);
                     if(Has(args,"--install")) {
                         string dataRoot=Arg(args,"--data-root")??Text(Read(SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
@@ -145,7 +167,7 @@ namespace ExperimentManagerDesktop {
                         monitor.IsBackground=true; monitor.Start(); Application.Run(form); show.Set();
                     }
                 }
-            } catch(Exception ex) { if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,"Experiment Manager",MessageBoxButtons.OK,MessageBoxIcon.Error); }
+            } catch(Exception ex) { if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,"Experiment Manager",MessageBoxButtons.OK,MessageBoxIcon.Error); }
         }
     }
 
@@ -178,11 +200,19 @@ namespace ExperimentManagerDesktop {
             row.Controls.Add(browse,1,0); panel.Controls.Add(row); panel.Controls.Add(desktop); panel.Controls.Add(startup); panel.Controls.Add(status); panel.Controls.Add(install); Controls.Add(panel);
             install.Click+=async (s,e)=> {
                 if(installing)return;installing=true;install.Enabled=false; status.Text="正在安装…";
+                string stage="installing";
                 try {
+                    App.UpdateReport(stage,"running");
                     string dataPath=data.Text,credential=pairing.Text; bool makeDesktop=desktop.Checked,autoStart=startup.Checked;
                     string destination=await Task.Run(()=>Install(dataPath,credential,makeDesktop,autoStart));
-                    Process.Start(new ProcessStartInfo(Path.Combine(destination,App.Executable),App.Worker&&App.Has(args,"--resume-service")?"--background":""){WorkingDirectory=destination,UseShellExecute=true}); installing=false;Close();
-                } catch(Exception ex) { status.Text=ex.Message; installing=false;install.Enabled=true; }
+                    stage="starting_client";
+                    App.UpdateReport(stage,"running",destination);
+                    string startArgs="--after-update"+(App.Worker&&App.Has(args,"--resume-service")?" --background":"");
+                    var launched=Process.Start(new ProcessStartInfo(Path.Combine(destination,App.Executable),startArgs){WorkingDirectory=destination,UseShellExecute=true});
+                    if(launched==null)throw new Exception("新客户端未能启动，请从开始菜单打开客户端。");
+                    launched.Dispose();
+                    installing=false;Close();
+                } catch(Exception ex) { App.UpdateReport(stage,"failed",ex.Message);status.Text=ex.Message; installing=false;install.Enabled=true; }
             };
             FormClosing+=(s,e)=>{if(installing){e.Cancel=true;status.Text="正在安装，请等待完成后再关闭。";}};
             if(App.Has(args,"--apply-update"))Shown+=(s,e)=>install.PerformClick();
@@ -218,6 +248,7 @@ namespace ExperimentManagerDesktop {
                     }
                 }
                 var settings=App.Read(App.SettingsFile);
+                VerifyBackendStopped(destination,dataPath,settings);
                 if(!App.Worker) settings["data_root"]=Path.GetFullPath(dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
@@ -232,6 +263,18 @@ namespace ExperimentManagerDesktop {
                 return destination;
             }
         }
+        internal static void VerifyBackendStopped(string destination,string dataPath,Dictionary<string,object> settings) {
+            Dictionary<string,object> state;
+            if(App.Worker) {
+                string distribution=App.Text(settings,"distribution");
+                // A fresh worker installation has no selected Linux service yet.
+                if(string.IsNullOrEmpty(distribution))return;
+                string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",destination).Trim();
+                state=App.Command("wsl.exe","-d",distribution,"--exec","bash",package+"/Client-Worker.sh","install-status");
+            } else state=App.Command(Path.Combine(destination,"runtime","python.exe"),"-m","expman.desktop",
+                "controller-install-status","--root",Path.GetFullPath(dataPath));
+            DesktopLifecycle.RequireInstallReady(state,App.Worker);
+        }
     }
 
     sealed class ClientForm : IconForm {
@@ -240,6 +283,7 @@ namespace ExperimentManagerDesktop {
         UpdateForm updateDialog;
         BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
+        bool startingAfterUpdate;
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
@@ -250,6 +294,7 @@ namespace ExperimentManagerDesktop {
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=5000 };
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
+            startingAfterUpdate=App.Has(args,"--after-update");
             string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
             Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
@@ -285,10 +330,11 @@ namespace ExperimentManagerDesktop {
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
-            menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出客户端（后台继续运行）",null,(s,e)=>{exiting=true;Close();}); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
+            menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
             timer.Tick+=(s,e)=>{tray.Icon=trayIcons.TrayIcon;RefreshState();};
             Shown+=async (s,e)=> {
+                if(startingAfterUpdate)App.UpdateReport("client_start","launched");
                 if(App.Worker) {
                     await Execute(async()=>{
                         string inventory=await Task.Run(()=>App.Run("wsl.exe","--list","--quiet"));
@@ -312,8 +358,34 @@ namespace ExperimentManagerDesktop {
             if(disposing) trayIcons.Dispose();
         }
         static void AddButton(Control parent,string text,Action action) {var button=new Button {Text=text,AutoSize=true,Margin=new Padding(0,8,12,8)};button.Click+=(s,e)=>action();parent.Controls.Add(button);}
-        async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}}finally{busy=false;} }
+        async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;if(startingAfterUpdate)App.UpdateReport("backend_start","failed",ex.Message);try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}}finally{busy=false;} }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
+        async void ExitFromTray() {
+            if(busy){Show();WindowState=FormWindowState.Normal;Activate();return;}
+            busy=true;timer.Stop();Enabled=false;tray.ContextMenuStrip.Enabled=false;
+            Show();WindowState=FormWindowState.Normal;
+            summary.Text=App.Worker?"正在保存并停止实验，完成后退出算力客户端…":"正在停止管理服务并退出实验台…";
+            try {
+                if(App.Worker&&distro.SelectedItem==null&&String.IsNullOrWhiteSpace(App.Text(settings,"distribution"))&&
+                        DesktopLifecycle.CanExitUnconfiguredWorker(App.Text(settings,"distribution"),App.RegisteredDistributions())) {
+                    exiting=true;Close();return;
+                }
+                var requested=App.Worker?await WorkerCommand("shutdown"):await Controller("controller-stop");
+                Display(requested);
+                if(App.Text(requested,"status")=="exit_failed")throw new Exception(App.Text(requested,"detail","后台退出失败，请重试。"));
+                await DesktopLifecycle.WaitForStopped(
+                    ()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),Display,
+                    App.Worker?(TimeSpan?)null:TimeSpan.FromSeconds(30),finalStatus:App.Worker?"stopped":null);
+                if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
+                exiting=true;Close();
+            } catch(Exception ex) {
+                summary.Text="退出未完成："+ex.Message+"\n客户端已保留，可从托盘重试退出。";
+                try {App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}
+                Show();WindowState=FormWindowState.Normal;Activate();
+            } finally {
+                if(!exiting){busy=false;Enabled=true;tray.ContextMenuStrip.Enabled=true;timer.Start();}
+            }
+        }
         void CheckUpdates(){
             if(updateDialog!=null){updateDialog.Activate();return;}
             if(busy){MessageBox.Show("当前操作完成后再检查更新。",App.Title);return;}
@@ -342,25 +414,22 @@ namespace ExperimentManagerDesktop {
                 stopRequested=true;
                 var stopped=App.Worker?await WorkerCommand("stop-for-update"):await Controller("controller-stop-for-update");
                 if(!App.Flag(stopped,"ready_for_update"))throw new Exception(App.Text(stopped,"detail","暂时无法安全停止服务。"));
-                bool running=true;
-                for(int attempt=0;attempt<40;attempt++) {
-                    var state=App.Worker?await WorkerCommand("status"):await Controller("controller-status");
-                    running=App.Flag(state,"running");if(!running)break;
-                    await Task.Delay(250);
-                }
-                if(running)throw new Exception("服务仍在退出，请稍后再次安装。");
+                await DesktopLifecycle.WaitForStopped(
+                    ()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),null,TimeSpan.FromSeconds(30));
                 ready=App.Worker?await WorkerCommand("update-status"):await Controller("controller-update-status");
                 if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","停止后检查未通过。"));
                 await Task.Run(()=>UpdateService.ValidateDownloaded(release,installer));
                 using(var self=Process.GetCurrentProcess()) {
                     var arguments=new List<string>{"--apply-update","--wait-pid",self.Id.ToString(),"--wait-start",self.StartTime.ToUniversalTime().Ticks.ToString()};
                     if(resumeWorkerAfterUpdate)arguments.Add("--resume-service");
+                    App.UpdateReport("handoff","running",release.Version);
                     var next=Process.Start(new ProcessStartInfo(installer,App.Arguments(arguments.ToArray())){UseShellExecute=false,CreateNoWindow=true});
                     if(next==null)throw new Exception("无法启动更新安装程序。");
                     next.Dispose();
                 }
             } catch(Exception ex) {failure=ex;}
             if(failure!=null) {
+                App.UpdateReport("preparing_install","failed",failure.Message);
                 string recovery="";
                 if(stopRequested&&wasRunning) {
                     try {
@@ -396,7 +465,7 @@ namespace ExperimentManagerDesktop {
                 }
                 var result=App.Command("wsl.exe",argv.ToArray());
                 if(action=="update-status")return result;
-                if(action!="stop"&&action!="stop-for-update"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing")) {
+                if(action!="stop"&&action!="stop-for-update"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing"||App.Text(result,"status")=="shutting_down")) {
                     if(heldDistribution!=distribution) {
                         if(workerHold!=null)workerHold.Dispose();
                         workerHold=Process.Start(new ProcessStartInfo("wsl.exe",App.Arguments("-d",distribution,"--exec","bash",package+"/Client-Worker.sh","_hold")){UseShellExecute=false,CreateNoWindow=true});
@@ -411,7 +480,14 @@ namespace ExperimentManagerDesktop {
         async void Stop(){await Execute(async()=>{Display(App.Worker?await WorkerCommand("stop"):await Controller("controller-stop"));});}
         async void OpenController(){await Execute(async()=>{var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
         void Display(Dictionary<string,object> value) {
-            summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+App.Text(value,"status")+"\n"+App.Text(value,"detail");
+            string state=App.Text(value,"status");
+            string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state;
+            summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
+            string backendVersion=App.Text(value,"version");
+            if(!string.IsNullOrEmpty(backendVersion))summary.Text+="\n客户端版本："+App.Version+" · 后台版本："+backendVersion;
+            if(startingAfterUpdate&&App.Flag(value,"running")&&(App.Worker||App.Flag(value,"responsive"))&&UpdateService.BackendMatchesRelease(backendVersion,App.Version)) {
+                App.UpdateReport("backend_start","completed",backendVersion);startingAfterUpdate=false;
+            }
             lastLog=App.Text(value,"log_path");
             if(App.Worker) {
                 object raw;if(value.TryGetValue("candidates",out raw)&&raw is IList) foreach(object item in (IList)raw) {

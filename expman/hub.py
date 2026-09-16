@@ -71,6 +71,24 @@ def _number(value, name, minimum=0, maximum=10**12):
         raise APIError(400, f"Invalid numeric {name}")
 
 
+def _timing(value):
+    """Validate a complete worker sample without relying on wall-clock order."""
+    value = _object(value, "timing")
+    fields = ("started_at", "finished_at", "elapsed_seconds", "observed_at", "complete")
+    if any(key not in value for key in fields):
+        raise APIError(400, "timing must include started_at, finished_at, elapsed_seconds, observed_at and complete")
+    for key in fields[:-1]:
+        if key in ("started_at", "finished_at") and value[key] is None:
+            continue
+        try:
+            _number(value[key], "timing." + key, maximum=float("inf"))
+        except OverflowError as error:
+            raise APIError(400, "Invalid numeric timing." + key) from error
+    if not isinstance(value["complete"], bool):
+        raise APIError(400, "timing.complete must be boolean")
+    return {key: value[key] for key in fields}
+
+
 def _snapshot(value):
     """Reject shapes which could crash scheduling; unknown descriptive keys pass."""
     value = _object(value, "snapshot")
@@ -201,7 +219,7 @@ class Hub:
                 updated REAL NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
                 seq INTEGER NOT NULL DEFAULT 0, metrics TEXT NOT NULL DEFAULT '{}',
                 command_id INTEGER NOT NULL DEFAULT 0, command_ack INTEGER NOT NULL DEFAULT 0,
-                action TEXT, resume_after_attempt INTEGER, log_tail TEXT NOT NULL DEFAULT '');
+                action TEXT, resume_after_attempt INTEGER, log_tail TEXT NOT NULL DEFAULT '', timing TEXT);
             CREATE TABLE IF NOT EXISTS submissions (
                 request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, ids TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (
@@ -229,6 +247,8 @@ class Hub:
             columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
             if "log_tail" not in columns:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN log_tail TEXT NOT NULL DEFAULT ''")
+            if "timing" not in columns:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN timing TEXT")
             project_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(projects)")}
             if "bundle_id" not in project_columns:
                 self.db.execute("ALTER TABLE projects ADD COLUMN bundle_id TEXT NOT NULL DEFAULT ''")
@@ -328,6 +348,7 @@ class Hub:
         result = dict(row)
         result["spec"] = json.loads(result["spec"])
         result["metrics"] = json.loads(result["metrics"])
+        result["timing"] = json.loads(result["timing"]) if result["timing"] is not None else None
         result.pop("resume_after_attempt", None)
         return result
 
@@ -495,12 +516,13 @@ class Hub:
                 if "log_tail" in report and (not isinstance(log_tail, str) or len(log_tail.encode("utf-8")) > 16 * 1024):
                     raise APIError(400, "log_tail must be a string of at most 16 KiB UTF-8")
                 command_ack = _integer(report.get("command_ack", 0), "command_ack", 0, row["command_id"])
-                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail))
+                timing = _timing(report["timing"]) if "timing" in report else None
+                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing))
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (now(), _json(snapshot), node_id))
             for digest, revision, status, detail in project_checked:
                 self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? WHERE digest=? AND node_id=? AND revision=?", (status, detail, now(), digest, node_id, revision))
             ack = {}
-            for report, seq, attempt, state, detail, metrics, command_ack, log_tail in checked:
+            for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing in checked:
                 row = self._owned(report["id"], node_id)
                 # Commands are acknowledged independently of report sequence.
                 if command_ack > row["command_ack"]:
@@ -518,7 +540,12 @@ class Hub:
                 if attempt == row["attempt"] and state in PROGRESS and row["state"] in PROGRESS and PROGRESS[state] < PROGRESS[row["state"]]:
                     valid = False
                 if valid:
-                    self.db.execute("UPDATE jobs SET state=?,detail=?,attempt=?,seq=?,metrics=?,updated=?,resume_after_attempt=?,log_tail=? WHERE id=?", (state, detail, attempt, seq, _json(metrics), now(), None if resume or cancel else row["resume_after_attempt"], row["log_tail"] if log_tail is None else log_tail, row["id"]))
+                    timestamp = now()
+                    # The worker owns accumulated runtime, including offline runs.
+                    # An old worker's report makes timing unknown instead of leaving
+                    # a stale running sample to continue ticking after a transition.
+                    serialized_timing = _json({**timing, "received_at": timestamp}) if timing is not None else None
+                    self.db.execute("UPDATE jobs SET state=?,detail=?,attempt=?,seq=?,metrics=?,updated=?,resume_after_attempt=?,log_tail=?,timing=? WHERE id=?", (state, detail, attempt, seq, _json(metrics), timestamp, None if resume or cancel else row["resume_after_attempt"], row["log_tail"] if log_tail is None else log_tail, serialized_timing, row["id"]))
                     if state != row["state"] or attempt != row["attempt"]:
                         self._event(row["id"], "state", {"state": state, "detail": detail, "attempt": attempt})
                     if _json(metrics) != row["metrics"] or attempt != row["attempt"] and metrics:
@@ -659,6 +686,7 @@ class Hub:
             events = list(self.db.execute("SELECT * FROM events WHERE job_id=? ORDER BY event_id DESC LIMIT 200", (job_id,)))
             result["events"] = [{**dict(row), "data": json.loads(row["data"])} for row in reversed(events)]
             result["artifacts"] = [dict(row) for row in self.db.execute("SELECT name,size,sha256,uploaded FROM artifacts WHERE job_id=? ORDER BY name,uploaded", (job_id,))]
+            result["time"] = now()
             return result
 
     def _archive_paths(self, job_id, digest):
@@ -755,11 +783,15 @@ class Hub:
 
         with self.lock:
             rows = []
+            timing_fields = ["started_at", "finished_at", "elapsed_seconds", "observed_at", "complete"]
             fields = ["id", "name", "algorithm", "group", "metric_protocol", "node_id", "state", "attempt", "updated"]
+            fields += ["timing." + key for key in timing_fields]
             extra = set()
             for record in self.db.execute("SELECT * FROM jobs ORDER BY created,id"):
                 job = self._job(record)
                 result = {key: job.get(key, job["spec"].get(key, "")) for key in fields}
+                for key in timing_fields:
+                    result["timing." + key] = job["timing"][key] if job["timing"] is not None else ""
                 flatten(job["spec"]["params"], "params", result)
                 flatten(job["metrics"], "metrics", result)
                 extra.update(set(result) - set(fields))
@@ -821,12 +853,12 @@ def make_server(hub, host="127.0.0.1", port=8765):
         def _route(self):
             url = urlsplit(self.path)
             path = url.path
-            if self.command == "GET" and path in ("/", "/app.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
-                content_type = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8", "favicon.ico": "image/vnd.microsoft.icon"}[filename]
+                content_type = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "timing.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8", "favicon.ico": "image/vnd.microsoft.icon"}[filename]
                 self._bytes(static.read_bytes(), content_type)
                 return
             if not path.startswith("/api/"):

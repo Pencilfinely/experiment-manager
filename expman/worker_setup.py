@@ -1,14 +1,20 @@
 """Generic release worker: pair, inspect, build, verify and start without JSON edits."""
+import codecs
+from collections import deque
 import csv
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -20,6 +26,8 @@ from .pairing import validate_pairing
 BASE_IMAGE = 'pytorch/pytorch@sha256:c16f4c749e2d9e96878875cdf6cc45cddda1d1a36fddd371dd6f2360f1b6e2a2'
 REGISTRY_IMAGE = 'registry:3'
 GPU_UUID = re.compile(r'GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
+COMMAND_OUTPUT_LIMIT = 1024 * 1024
+COMMAND_HEARTBEAT_SECONDS = 30
 DOCKERFILE = '''ARG BASE_IMAGE=''' + BASE_IMAGE + '''
 FROM ${BASE_IMAGE}
 ENV PYTHONPATH=/opt/experiment-manager PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp XDG_CACHE_HOME=/tmp/cache OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
@@ -28,6 +36,15 @@ WORKDIR /workspace/code
 ENTRYPOINT []
 CMD ["python", "-m", "expman.gpu_check"]
 '''
+
+
+class SetupCancelled(RuntimeError):
+    """A cooperative exit canceled this setup's own command process."""
+
+
+def _check_cancel(cancel_requested):
+    if cancel_requested is not None and cancel_requested():
+        raise SetupCancelled('Setup canceled for application exit / 已取消环境准备，正在退出')
 
 
 def private_write(path, value):
@@ -62,7 +79,8 @@ def authenticate(pairing):
 
 
 class WorkerSetup:
-    def __init__(self, root, pairing):
+    def __init__(self, root, pairing, *, cancel_requested=None):
+        self.cancel_requested = cancel_requested
         self.root = Path(root).expanduser().resolve()
         if ',' in str(self.root):
             raise ValueError('Worker data path cannot contain a comma')
@@ -78,7 +96,8 @@ class WorkerSetup:
     def save(self):
         private_write(self.state_path, self.state)
 
-    def command(self, argv, timeout=1800, check=True, cwd=None):
+    def command(self, argv, timeout=1800, check=True, cwd=None, *, progress=False):
+        _check_cancel(self.cancel_requested)
         self.root.mkdir(parents=True, exist_ok=True)
         actual = list(argv)
         environment = dict(os.environ)
@@ -86,15 +105,141 @@ class WorkerSetup:
             actual = ['docker', '--host', self.endpoint, *argv[1:]]
             environment.pop('DOCKER_CONTEXT', None)
             environment.pop('DOCKER_HOST', None)
-        # Output is retained for diagnosis; credentials are never argv values.
-        result = subprocess.run(actual, cwd=cwd, env=environment, timeout=timeout,
-                                capture_output=True, text=True, encoding='utf-8', errors='replace')
-        output = (result.stdout + '\n' + result.stderr).replace(self.pairing['token'], '[redacted]')
+        token = self.pairing['token']
+        captured, captured_size = deque(), 0
+        pending = ''
+        decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder('utf-8')(errors='replace'), translate=True)
+        chunks = queue.Queue(maxsize=64)
+        stopped = threading.Event()
+        process = reader = None
+
         with self.log_path.open('a', encoding='utf-8') as log:
-            log.write('\n$ ' + repr(argv) + '\n' + output)
-        if check and result.returncode:
+            def record(value, display=False):
+                log.write(value)
+                log.flush()
+                if display:
+                    print(value, end='', flush=True)
+
+            def consume(data, final=False):
+                nonlocal pending, captured_size
+                value = (pending + decoder.decode(data, final=final)).replace(token, '[redacted]')
+                pending = ''
+                # A credential can straddle arbitrary pipe reads. Retain only a
+                # possible credential prefix, so ordinary progress appears now.
+                if not final:
+                    for length in range(min(len(token) - 1, len(value)), 0, -1):
+                        if token.startswith(value[-length:]):
+                            pending, value = value[-length:], value[:-length]
+                            break
+                if value:
+                    record(value, progress)
+                    captured.append(value)
+                    captured_size += len(value)
+                    while captured and captured_size - len(captured[0]) >= COMMAND_OUTPUT_LIMIT:
+                        captured_size -= len(captured.popleft())
+
+            def read_output():
+                try:
+                    while not stopped.is_set():
+                        data = process.stdout.read(4096)
+                        while not stopped.is_set():
+                            try:
+                                chunks.put(data, timeout=0.1)
+                                break
+                            except queue.Full:
+                                continue
+                        if not data:
+                            return
+                except OSError as error:
+                    if not stopped.is_set():
+                        chunks.put(error)
+
+            def terminate():
+                if process is None:
+                    return
+                # Docker build may spawn buildx. Stop our entire CLI process
+                # group, leaving unrelated containers and the daemon alone.
+                if os.name != 'nt':
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                elif process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+                finally:
+                    if os.name != 'nt':
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    elif process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=3)
+
+            started = last_output = last_heartbeat = time.monotonic()
+            record('\n$ ' + repr(actual).replace(token, '[redacted]') + '\n', progress)
+            try:
+                _check_cancel(self.cancel_requested)
+                process = subprocess.Popen(actual, cwd=cwd, env=environment, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, bufsize=0, start_new_session=os.name != 'nt')
+                reader = threading.Thread(target=read_output, daemon=True)
+                reader.start()
+                eof = False
+                while True:
+                    _check_cancel(self.cancel_requested)
+                    now = time.monotonic()
+                    elapsed, silent = now - started, now - last_output
+                    if eof and process.poll() is not None:
+                        break
+                    if elapsed >= timeout:
+                        reason = f'Command exceeded {timeout}s / 命令超过 {timeout} 秒'
+                        advice = ('\nCheck Docker Desktop/daemon, registry network/proxy and free disk space; '
+                                  'then retry setup. Completed image layers are reused. / '
+                                  '请检查 Docker 服务、镜像仓库网络/代理及磁盘空间后重试，已完成的镜像层会复用。'
+                                  if argv[0] == 'docker' else '\nCheck the command and retry / 请检查命令后重试。')
+                        raise RuntimeError(reason + advice + '\nLog / 日志: ' + str(self.log_path))
+                    if progress and now - last_heartbeat >= COMMAND_HEARTBEAT_SECONDS:
+                        record(f'\n[setup] Elapsed / 已用 {elapsed:.0f}s; last output / 距上次输出 {silent:.0f}s. '
+                               f'Log / 日志: {self.log_path}\n', True)
+                        last_heartbeat = now
+                    wait = min(0.2, max(0.001, timeout - elapsed))
+                    try:
+                        data = chunks.get(timeout=wait)
+                    except queue.Empty:
+                        continue
+                    if isinstance(data, OSError):
+                        raise data
+                    if not data:
+                        eof = True
+                        continue
+                    last_output = time.monotonic()
+                    consume(data)
+            except BaseException as error:
+                terminate()
+                # Retain any partial output already read when a timeout or
+                # cancellation interrupts the command.
+                while not chunks.empty():
+                    data = chunks.get_nowait()
+                    if isinstance(data, bytes) and data:
+                        consume(data)
+                record('\n[setup] ' + (str(error) or type(error).__name__).replace(token, '[redacted]') + '\n')
+                raise
+            finally:
+                stopped.set()
+                if reader is not None:
+                    reader.join(timeout=1)
+                if process is not None:
+                    process.stdout.close()
+                consume(b'', final=True)
+            record(f'\n[setup] Exit {process.returncode}; elapsed {time.monotonic() - started:.1f}s\n')
+        output = ''.join(captured)[-COMMAND_OUTPUT_LIMIT:]
+        if check and process.returncode:
             raise RuntimeError(output[-2000:] + '\nLog / 日志: ' + str(self.log_path))
-        return result.returncode, output
+        return process.returncode, output
 
     def prerequisites(self):
         print('[1/5] Checking Docker, GPU, disk and controller / 检查环境和连接', flush=True)
@@ -176,14 +321,19 @@ class WorkerSetup:
         self.commit = commit.strip()
 
     def image(self):
-        print('[3/5] Preparing PyTorch runtime (first download can take several minutes) / 首次下载较大，请稍候', flush=True)
+        print('[3/5] Preparing PyTorch runtime / 准备 PyTorch 运行环境；下方显示下载和构建进度', flush=True)
+        print(f'  Progress log / 实时日志: {self.log_path}', flush=True)
+        print('  Docker may be silent while downloading a layer; elapsed time is shown every 30s. / '
+              '镜像层下载期间可能暂时无输出，每 30 秒显示等待时间。', flush=True)
+        print('  [3.1] Preparing local image registry / 准备本地镜像仓库', flush=True)
         registry = 'expman-worker-registry'
         code, output = self.command(['docker', 'container', 'inspect', registry], check=False)
         if code:
             self.command(['docker', 'run', '-d', '--name', registry, '--restart', 'unless-stopped',
                           '--label', 'expman.component=worker-registry', '-p', '127.0.0.1:5001:5000',
                           '-v', 'expman-worker-registry-data:/var/lib/registry',
-                          '-e', 'OTEL_TRACES_EXPORTER=none', REGISTRY_IMAGE])
+                          '-e', 'OTEL_TRACES_EXPORTER=none', REGISTRY_IMAGE],
+                         progress=True)
         else:
             item = json.loads(output)[0]
             if (item['Config'].get('Labels', {}).get('expman.component') != 'worker-registry'
@@ -193,20 +343,24 @@ class WorkerSetup:
                 self.command(['docker', 'start', registry])
         cache = self.state.get('image', {})
         if cache.get('source_id') == self.source_id and cache.get('base') == BASE_IMAGE:
-            self.command(['docker', 'pull', cache['reference']])
+            print('  Reusing prepared runtime / 复用已准备好的运行环境', flush=True)
+            self.command(['docker', 'pull', cache['reference']], progress=True)
             return cache['reference']
         tag = 'localhost:5001/expman-runtime:' + self.source_id[:20]
         # Docker Desktop's pull path can use its configured proxy even when
         # BuildKit's direct metadata lookup cannot reach the registry.
-        self.command(['docker', 'pull', BASE_IMAGE], timeout=7200)
-        self.command(['docker', 'build', '--build-arg', 'BASE_IMAGE=' + BASE_IMAGE, '-t', tag, '.'],
-                     cwd=self.build_root, timeout=7200)
-        _, output = self.command(['docker', 'push', tag], timeout=7200)
+        print('  [3.2] Downloading PyTorch base image / 下载 PyTorch 基础镜像', flush=True)
+        self.command(['docker', 'pull', BASE_IMAGE], timeout=7200, progress=True)
+        print('  [3.3] Building worker runtime / 构建算力端运行环境', flush=True)
+        self.command(['docker', 'build', '--progress=plain', '--build-arg', 'BASE_IMAGE=' + BASE_IMAGE, '-t', tag, '.'],
+                     cwd=self.build_root, timeout=7200, progress=True)
+        print('  [3.4] Publishing to local registry / 将运行环境写入本机镜像仓库', flush=True)
+        _, output = self.command(['docker', 'push', tag], timeout=7200, progress=True)
         digests = set(re.findall(r'\bdigest: (sha256:[0-9a-f]{64})\b', output))
         if len(digests) != 1:
             raise ValueError('Registry did not return a unique digest')
         reference = 'localhost:5001/expman-runtime@' + digests.pop()
-        self.command(['docker', 'pull', reference])
+        self.command(['docker', 'pull', reference], progress=True)
         self.state['image'] = {'source_id': self.source_id, 'base': BASE_IMAGE, 'reference': reference}
         self.save()
         return reference
@@ -283,7 +437,8 @@ def load_pairing(root, supplied):
     return pairing
 
 
-def start(args):
+def start(args, cancel_requested=None):
+    _check_cancel(cancel_requested)
     if sys.platform != 'linux':
         raise RuntimeError('Use Start-Worker.cmd to run the worker in WSL2')
     root = Path(args.root or Path.home() / '.local/share/experiment-manager/worker').expanduser().resolve()
@@ -304,20 +459,26 @@ def start(args):
         if not current or args.configure or args.gpu:
             # The agent lock prevents changes while an existing worker owns this runtime.
             with InstanceLock(root / 'runtime' / 'agent.lock'):
-                setup = WorkerSetup(root, pairing)
+                setup = WorkerSetup(root, pairing, cancel_requested=cancel_requested)
                 setup.prerequisites()
+                _check_cancel(cancel_requested)
                 selected = [g for g in setup.gpus if not args.gpu or g['uuid'] in args.gpu]
                 if not selected or args.gpu and set(args.gpu) != {g['uuid'] for g in selected}:
                     raise ValueError('Requested GPU UUID was not found')
                 setup.sources()
+                _check_cancel(cancel_requested)
                 image = setup.image()
+                _check_cancel(cancel_requested)
                 setup.verify(image, selected)
+                _check_cancel(cancel_requested)
                 config_path = setup.configure(image, selected)
                 private_write(root / 'pairing.json', pairing)
+        _check_cancel(cancel_requested)
         print('Worker ready / 算力端已就绪: ' + pairing['node_id'], flush=True)
         print('Data / 数据: ' + str(root), flush=True)
         print('Controller: choose this node\'s GPU check template, then submit once. / 主控网页中可填入本节点验收任务。', flush=True)
     if not args.prepare_only:
+        _check_cancel(cancel_requested)
         # Pin the validated local Docker endpoint for runtime bind mounts too.
         endpoint = read_json(root / 'setup-state.json', {}).get('docker_endpoint')
         if endpoint:

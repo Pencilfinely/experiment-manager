@@ -13,6 +13,7 @@ from expman import common, desktop, worker_service
 from expman.agent import Agent, inspect_update_state as inspect_worker
 from expman.hub import APIError, Hub
 from expman.launcher import InstanceLock
+from expman.update_protocol import supports_update_stop
 from tests.support import temporary_directory
 
 
@@ -49,6 +50,81 @@ class UpdateReadinessTests(unittest.TestCase):
         self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
         self.assertFalse(center.exists())
         self.assertFalse(self.service_root.exists())
+
+    def test_update_stop_uses_explicit_capability_and_known_older_releases_only(self):
+        for version in ('0.3.0rc2', '0.3.0rc3', '0.3.0-rc.2', '0.3.0-rc.3'):
+            with self.subTest(version=version):
+                self.assertTrue(supports_update_stop({'version': version}))
+                self.assertFalse(supports_update_stop({'version': version, 'update_stop_protocol': 0}))
+        for version in (None, '0.3.0rc1', '0.3.0-rc.1', '0.2.9', '0.4.0', 'unknown', {}):
+            with self.subTest(version=version):
+                self.assertFalse(supports_update_stop({'version': version}))
+        self.assertTrue(supports_update_stop({'version': '0.4.0', 'update_stop_protocol': 1}))
+        for protocol in (None, True, '1', 2):
+            with self.subTest(protocol=protocol):
+                self.assertFalse(supports_update_stop({'version': '0.3.0rc2', 'update_stop_protocol': protocol}))
+
+    def test_old_worker_backend_requires_manual_stop_without_wait_or_signal(self):
+        self.worker_database()
+        worker_service._write_status(self.service_root, pid=1234, process_identity='identity',
+                                     status='online', online=True, version='0.3.0rc1')
+        with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                patch.object(worker_service, '_require_linux'), \
+                patch.object(worker_service, '_update_containers') as docker, \
+                patch.object(worker_service.time, 'sleep') as sleep, \
+                patch.object(worker_service.os, 'kill') as signal:
+            result = worker_service.stop_for_update(self.service_root)
+            self.assertFalse(result['ready_for_update'])
+            self.assertTrue(result['manual_stop_required'])
+            self.assertEqual(result['backend_version'], '0.3.0rc1')
+            self.assertIn('停止代理', result['detail'])
+            self.assertNotIn('同步', result['detail'])
+            docker.assert_not_called()
+            sleep.assert_not_called()
+            signal.assert_not_called()
+        self.assertFalse((self.service_root / 'update-request.json').exists())
+
+    def test_worker_ignores_capability_left_by_a_previous_process(self):
+        self.worker_database()
+        worker_service._write_status(self.service_root, pid=1234, process_identity='new-identity',
+            status='online', online=True, version='0.3.0rc1', update_stop_protocol=1,
+            update_stop_process_identity='old-identity')
+        with patch.object(worker_service, '_process_identity', return_value='new-identity'):
+            self.assertNotIn('update_stop_protocol', worker_service.status(self.service_root))
+            self.assertTrue(worker_service.update_status(self.service_root)['manual_stop_required'])
+
+    def test_unmarked_rc2_and_rc3_workers_complete_cooperative_stop(self):
+        self.worker_database()
+        agent = SimpleNamespace(preparation=None, project_delivery=SimpleNamespace(installing=None))
+        for version in ('0.3.0rc2', '0.3.0rc3'):
+            with self.subTest(version=version):
+                worker_service._write_status(self.service_root, pid=1234, process_identity='identity',
+                                             status='online', online=True, version=version)
+                with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                        patch.object(worker_service, '_require_linux'), \
+                        patch.object(worker_service, '_update_containers', return_value=[]), \
+                        patch.object(worker_service.time, 'sleep', side_effect=lambda _: \
+                            worker_service._update_stop_at_boundary(self.service_root, agent)), \
+                        patch.object(worker_service.os, 'kill') as signal:
+                    result = worker_service.stop_for_update(self.service_root)
+                    self.assertTrue(result['ready_for_update'])
+                    self.assertEqual(result['status'], 'stopping')
+                    signal.assert_not_called()
+
+    def test_old_controller_backend_requires_manual_stop_before_api_or_request(self):
+        center = self.folder / 'center'
+        backend = dict(running=True, status='running', managed=True, version='0.3.0rc1')
+        with patch.object(desktop, 'controller_status', return_value=backend), \
+                patch.object(desktop.urllib.request, 'build_opener') as opener, \
+                patch.object(desktop.time, 'sleep') as sleep:
+            result = desktop.controller_stop_for_update(center)
+            self.assertFalse(result['ready_for_update'])
+            self.assertTrue(result['manual_stop_required'])
+            self.assertEqual(result['backend_version'], '0.3.0rc1')
+            self.assertIn('停止主控', result['detail'])
+            opener.assert_not_called()
+            sleep.assert_not_called()
+        self.assertFalse(center.exists())
 
     def test_unreachable_owned_controller_is_not_treated_as_stopped(self):
         center = self.folder / 'center'
@@ -155,7 +231,7 @@ class UpdateReadinessTests(unittest.TestCase):
     def test_tick_boundary_rechecks_work_and_never_signals_processes(self):
         database = self.worker_database()
         worker_service._write_status(self.service_root, pid=1234, process_identity='identity',
-                                     status='online', online=True)
+                                     status='online', online=True, version='0.3.0rc3')
         request = dict(request_id='first-request', pid=1234, process_identity='identity', expires=time.time() + 35)
         common.atomic_json(self.service_root / 'update-request.json', request)
         agent = SimpleNamespace(preparation=None, project_delivery=SimpleNamespace(installing=None))

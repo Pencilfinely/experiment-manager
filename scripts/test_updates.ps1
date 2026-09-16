@@ -3,6 +3,15 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# The installer subprocess checks exercise .NET Framework, as shipped. Match
+# the desktop test runner when CI invokes this script from PowerShell 7.
+if ($PSVersionTable.PSEdition -ne 'Desktop') {
+    $frameworkShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    & $frameworkShell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
+    if ($LASTEXITCODE -ne 0) { throw "Native update tests failed ($LASTEXITCODE)." }
+    exit 0
+}
+
 # Compile against the same .NET Framework/C# version as the shipped desktop app.
 # The harness exercises deterministic streams; it never contacts GitHub, creates
 # UI, starts a worker, or executes an installer.
@@ -21,6 +30,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using ExperimentManagerDesktop;
 
@@ -62,6 +72,53 @@ static class UpdateTests {
         catch(Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
     static void Run(string root) {
+        Assert(DesktopLifecycle.CanExitUnconfiguredWorker("",new string[0]),"Fresh worker without WSL cannot exit.");
+        Assert(DesktopLifecycle.CanExitUnconfiguredWorker("",new[]{"docker-desktop","docker-desktop-data"}),"Docker Desktop alone was mistaken for a configured worker.");
+        Assert(!DesktopLifecycle.CanExitUnconfiguredWorker("Ubuntu",new string[0]),"Configured worker skipped backend shutdown.");
+        Assert(!DesktopLifecycle.CanExitUnconfiguredWorker("",new[]{"Ubuntu"}),"Existing WSL environment bypassed shutdown checks.");
+        Assert(!DesktopLifecycle.CanExitUnconfiguredWorker("",null),"Unknown WSL inventory permitted unchecked exit.");
+        Assert(!DesktopLifecycle.CanExitUnconfiguredWorker("",new[]{""}),"Malformed WSL registration permitted unchecked exit.");
+        Assert(UpdateService.BackendMatchesRelease("0.3.0rc4","0.3.0-rc.4"),"Python RC version never confirmed new backend startup.");
+        Assert(UpdateService.BackendMatchesRelease("0.3.0-rc.4","v0.3.0-rc.4"),"SemVer backend spelling was rejected.");
+        Assert(!UpdateService.BackendMatchesRelease("0.3.0rc1","0.3.0-rc.4"),"Old backend was reported as upgraded.");
+        Assert(!UpdateService.BackendMatchesRelease("unknown","0.3.0-rc.4"),"Unknown backend was reported as upgraded.");
+        Assert(!UpdateService.BackendMatchesRelease(null,"0.3.0-rc.4"),"Missing backend version was reported as upgraded.");
+        DesktopLifecycle.RequireInstallReady(new Dictionary<string,object>{{"running",false},{"ready_for_install",true}},false);
+        assertions++;
+        Fails<InvalidOperationException>(() => DesktopLifecycle.RequireInstallReady(
+            new Dictionary<string,object>{{"running",true},{"ready_for_install",true}},false),
+            "Manual installer accepted an idle but still running legacy backend.");
+        Fails<InvalidOperationException>(() => DesktopLifecycle.RequireInstallReady(
+            new Dictionary<string,object>{{"running",false},{"ready_for_install",false}},true),
+            "Worker installation ignored an unsafe local execution state.");
+        Fails<InvalidOperationException>(() => DesktopLifecycle.RequireInstallReady(
+            new Dictionary<string,object>{{"ready_for_install",true}},false),
+            "Manual installer inferred that an unknown backend was stopped.");
+        var statuses = new Queue<Dictionary<string,object>>(new[] {
+            new Dictionary<string,object>{{"running",true},{"status","unresponsive"}},
+            new Dictionary<string,object>{{"running",false},{"status","shutting_down"}},
+            new Dictionary<string,object>{{"running",false},{"status","stopped"}}
+        });
+        int observed = 0, delays = 0;
+        DesktopLifecycle.WaitForStopped(() => Task.FromResult(statuses.Dequeue()), state => observed++, null,
+            () => { delays++; return Task.FromResult(0); }).GetAwaiter().GetResult();
+        Assert(observed == 3 && delays == 2, "Exit completed while service was still running or shutting down.");
+        Fails<InvalidDataException>(() => DesktopLifecycle.WaitForStopped(
+            () => Task.FromResult(new Dictionary<string,object>{{"status","stopped"}}), null, null).GetAwaiter().GetResult(),
+            "Missing running flag was treated as a stopped backend.");
+        Fails<IOException>(() => DesktopLifecycle.WaitForStopped(
+            () => Task.FromResult(new Dictionary<string,object>{{"running",true},{"status","exit_failed"},{"detail","Checkpoint failed"}}),
+            null, null).GetAwaiter().GetResult(), "Failed checkpoint exit was ignored.");
+        Fails<IOException>(() => DesktopLifecycle.WaitForStopped(
+            () => Task.FromResult(new Dictionary<string,object>{{"running",false},{"status","unknown"}}),
+            null, TimeSpan.Zero).GetAwaiter().GetResult(), "Unknown status permitted update handoff.");
+        Fails<IOException>(() => DesktopLifecycle.WaitForStopped(
+            () => Task.FromResult(new Dictionary<string,object>{{"running",true},{"status","stopping"}}),
+            null, TimeSpan.Zero).GetAwaiter().GetResult(), "Stop timeout was silently accepted.");
+        Fails<IOException>(() => DesktopLifecycle.WaitForStopped(
+            () => Task.FromResult(new Dictionary<string,object>{{"running",false},{"status","failed"}}),
+            null, null, finalStatus:"stopped").GetAwaiter().GetResult(),
+            "Worker crash was treated as completed experiment shutdown.");
         Assert(UpdateService.CompareVersions("0.3.0-rc.10", "0.3.0-rc.2") > 0, "RC versions must compare numerically.");
         Assert(UpdateService.CompareVersions("v0.3.0", "0.3.0-rc.99") > 0, "Stable must follow prerelease.");
         Assert(UpdateService.CompareVersions("1.0.0+build.2", "1.0.0+build.1") == 0, "Build metadata must not change precedence.");
@@ -185,6 +242,91 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Update service compilation failed.' }
     & $testExe $testRoot
     if ($LASTEXITCODE -ne 0) { throw 'Update service tests failed.' }
+
+    # Exercise the installer's real subprocess boundary with an isolated status
+    # executable. No application settings, service, browser or installer runs.
+    $probeRuntime = Join-Path $testRoot 'runtime'
+    New-Item -ItemType Directory -Path $probeRuntime | Out-Null
+    $fakePythonSource = Join-Path $testRoot 'StatusFixture.cs'
+    @'
+using System;
+using System.IO;
+using System.Threading;
+static class StatusFixture {
+    static int Main(string[] args) {
+        if(args.Length == 2 && args[0] == "--hold") {
+            var limit=DateTime.UtcNow.AddSeconds(10);
+            while(!File.Exists(args[1])&&DateTime.UtcNow<limit)Thread.Sleep(20);
+            return File.Exists(args[1])?0:3;
+        }
+        if(args.Length != 5 || args[0] != "-m" || args[1] != "expman.desktop" ||
+            args[2] != "controller-install-status" || args[3] != "--root")return 2;
+        Console.Write(File.ReadAllText(Path.Combine(args[4],"status.json")));
+        return 0;
+    }
+}
+'@ | Set-Content -LiteralPath $fakePythonSource -Encoding UTF8
+    & $compiler /nologo /target:exe ("/out:" + (Join-Path $probeRuntime 'python.exe')) $fakePythonSource
+    if ($LASTEXITCODE -ne 0) { throw 'Isolated status fixture compilation failed.' }
+    $probeSource = Join-Path $testRoot 'InstallProbeTests.cs'
+    @'
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using ExperimentManagerDesktop;
+static class InstallProbeTests {
+    static int Main(string[] args) {
+        try {
+            App.Worker=false;
+            string data=Path.Combine(args[0],"legacy data");Directory.CreateDirectory(data);
+            string status=Path.Combine(data,"status.json");
+            var settings=new Dictionary<string,object>();
+            File.WriteAllText(status,"{\"running\":false,\"status\":\"stopped\",\"ready_for_install\":true,\"unverified_nodes\":1}");
+            InstallerForm.VerifyBackendStopped(args[0],data,settings);
+            foreach(string invalid in new[] {
+                "{\"running\":true,\"status\":\"running\",\"version\":\"0.3.0rc1\",\"ready_for_install\":false}",
+                "{\"running\":true,\"status\":\"unresponsive\",\"ready_for_install\":false}",
+                "{\"running\":false,\"status\":\"stopped\",\"ready_for_update\":true}"
+            }) {
+                File.WriteAllText(status,invalid);bool refused=false;
+                try {InstallerForm.VerifyBackendStopped(args[0],data,settings);}
+                catch(InvalidOperationException){refused=true;}
+                if(!refused)throw new Exception("Installer accepted an unverified or old running backend.");
+            }
+            string helper=Path.Combine(args[0],"runtime","python.exe");
+            string release=Path.Combine(args[0],"release-client");
+            using(var child=Process.Start(new ProcessStartInfo(helper,App.Arguments("--hold",release)){UseShellExecute=false,CreateNoWindow=true})) {
+                var finish=Task.Run(()=>{Thread.Sleep(100);File.WriteAllText(release,"exit");});
+                App.WaitForPreviousClient(new[]{"--wait-pid",child.Id.ToString(),"--wait-start",child.StartTime.ToUniversalTime().Ticks.ToString()});
+                if(!child.HasExited)throw new Exception("Installer continued before previous client exited.");
+                finish.GetAwaiter().GetResult();
+            }
+            File.Delete(release);
+            using(var child=Process.Start(new ProcessStartInfo(helper,App.Arguments("--hold",release)){UseShellExecute=false,CreateNoWindow=true})) {
+                App.WaitForPreviousClient(new[]{"--wait-pid",child.Id.ToString(),"--wait-start",(child.StartTime.ToUniversalTime().Ticks+1).ToString()});
+                if(child.HasExited)throw new Exception("Installer waited on a reused process identity.");
+                File.WriteAllText(release,"exit");
+                child.WaitForExit(5000);
+            }
+            Console.WriteLine("PASS installer subprocess boundary: local stopped state, quoted data root, old backend, unresponsive backend, separate install protocol and previous-client handoff identity.");
+            return 0;
+        } catch(Exception ex){Console.Error.WriteLine(ex);return 1;}
+    }
+}
+'@ | Set-Content -LiteralPath $probeSource -Encoding UTF8
+    $probeExe = Join-Path $testRoot 'InstallProbeTests.exe'
+    $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
+    $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
+    $compileArgs += $references | ForEach-Object { '/r:' + $_ }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopIcons.cs','BrowserAppWindow.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += $probeSource
+    & $compiler @compileArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }
+    & $probeExe $testRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Installer subprocess checks failed.' }
 }
 finally {
     # Only remove this test's freshly created directory beneath the workspace.

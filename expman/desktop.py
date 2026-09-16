@@ -5,8 +5,10 @@ import argparse
 import base64
 from contextlib import closing
 import json
+import math
 import os
 from pathlib import Path
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -15,8 +17,10 @@ import time
 import urllib.request
 import uuid
 
+from . import __version__
 from .common import atomic_json, read_json
 from .launcher import InstanceLock, default_controller_root
+from .update_protocol import UPDATE_STOP_PROTOCOL, manual_stop_required, supports_update_stop
 
 
 def choose_directory():
@@ -59,8 +63,15 @@ def controller_status(root):
     settings, hub = read_json(root / 'launcher.json', {}), read_json(root / 'hub.json', {})
     port = settings.get('port', 8765)
     state = read_json(root / 'desktop-process.json', {})
-    result = {'running': False, 'status': 'stopped', 'root': str(root), 'port': port,
+    # A failed HTTP probe says nothing about process exit. In particular, the
+    # HTTP listener stops before imports, database handles and the lifecycle
+    # lock are released, so installation must keep waiting for that lock.
+    alive = _lock_is_held(root / 'controller.lock')
+    result = {'running': alive, 'responsive': False,
+              'status': 'unresponsive' if alive else 'stopped', 'root': str(root), 'port': port,
               'log_path': str(root / 'desktop.log'), 'managed': bool(state.get('nonce'))}
+    result['detail'] = ('主控进程仍在运行，暂时无法连接；请稍候，或点击停止主控后重试'
+                        if alive else '主控尚未启动')
     if not isinstance(port, int) or not hub.get('admin_token'):
         return result
     try:
@@ -68,22 +79,32 @@ def controller_status(root):
                                          headers={'Authorization': 'Bearer ' + hub['admin_token']})
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=2) as response:
             value = json.load(response)
+        if (not isinstance(value, dict) or not isinstance(value.get('nodes'), list)
+                or not isinstance(value.get('jobs'), list)):
+            raise ValueError('Invalid controller health response')
         # The request may have waited for startup. The owner file is written
         # before serve_forever, so refresh it after the successful health probe.
         state = read_json(root / 'desktop-process.json', {})
         result['managed'] = bool(state.get('nonce'))
-        result.update(running=True, status='running', version=value.get('version'),
+        result.update(running=True, responsive=True, status='running', version=value.get('version'),
             nodes=len(value.get('nodes', [])), jobs=len(value.get('jobs', [])),
             detail='主控运行中；关闭应用窗口后继续在后台运行')
+        if 'update_stop_protocol' in state and state.get('version') == value.get('version'):
+            result['update_stop_protocol'] = state['update_stop_protocol']
     except (OSError, ValueError):
-        result['detail'] = '主控尚未启动，或仍在启动中'
+        # Startup or shutdown may complete while the health request is pending.
+        alive = _lock_is_held(root / 'controller.lock')
+        result.update(running=alive, status='unresponsive' if alive else 'stopped',
+                      detail='主控进程仍在运行，暂时无法连接；请稍候，或点击停止主控后重试'
+                      if alive else '主控尚未启动，或仍在启动中')
     return result
 
 
 def controller_start(root, port=8765, host='0.0.0.0'):
     root = Path(root).expanduser().resolve()
-    if controller_status(root)['running']:
-        return controller_status(root)
+    status = controller_status(root)
+    if status['running']:
+        return status
     root.mkdir(parents=True, exist_ok=True)
     with InstanceLock(root / 'desktop-start.lock'):
         status = controller_status(root)
@@ -109,7 +130,7 @@ def controller_start(root, port=8765, host='0.0.0.0'):
             process = subprocess.Popen(argv, stdout=log, stderr=log, **kwargs)
         for _ in range(30):
             status = controller_status(root)
-            if status['running']:
+            if status.get('responsive'):
                 return status
             if process.poll() is not None:
                 raise RuntimeError('主控启动失败，请在应用中打开日志查看原因：' + str(root / 'desktop.log'))
@@ -158,6 +179,11 @@ def controller_update_status(root):
     try:
         result.update(controller_status(root))
         if result['running']:
+            if result.get('responsive') is False:
+                return dict(result, status='unknown', ready_for_update=False,
+                            detail='主控进程尚未退出或无法连接，不能确认可以更新')
+            if not supports_update_stop(result):
+                return manual_stop_required(result, worker=False)
             if not result.get('managed'):
                 return dict(result, ready_for_update=False, detail='请先退出旧主控启动窗口，再安装更新')
             config = read_json(root / 'hub.json')
@@ -186,6 +212,59 @@ def controller_update_status(root):
         return dict(result, **inspected)
     except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError, TypeError) as error:
         return dict(result, ready_for_update=False, detail='无法核查更新条件，请恢复服务后重试：' + str(error)[:300])
+
+
+def controller_install_status(root):
+    """Allow side-by-side installation only after this local controller exits.
+
+    This is distinct from stopping a running service for an automatic update:
+    persisted experiments and remote workers survive a manual local migration,
+    so their telemetry cannot decide whether local program files are in use.
+    """
+    root = Path(root).expanduser().resolve()
+    result = {'running': False, 'responsive': False, 'status': 'unknown',
+              'ready_for_install': False, 'root': str(root)}
+    try:
+        result.update(controller_status(root))
+        if result['running']:
+            return dict(result, ready_for_install=False, detail='请先停止本机主控，再安装新版本')
+        if _lock_is_held(root / 'controller.lock') or _lock_is_held(root / 'desktop-start.lock'):
+            return dict(result, running=True, status='starting',
+                        detail='本机主控仍在启动或退出，请稍候再安装')
+        pending_path = root / 'desktop-pending.json'
+        pending = read_json(pending_path, {})
+        if not isinstance(pending, dict):
+            raise ValueError('主控启动记录无效')
+        if pending_path.exists():
+            started = pending.get('started')
+            if (isinstance(started, bool) or not isinstance(started, (int, float))
+                    or not math.isfinite(started) or started < 0):
+                raise ValueError('主控启动记录无效')
+            if time.time() - started < 15:
+                return dict(result, status='starting', detail='本机主控正在启动，请稍候再安装')
+        settings_path = root / 'launcher.json'
+        settings = read_json(settings_path, {})
+        if not isinstance(settings, dict):
+            raise ValueError('主控端口配置无效')
+        if settings_path.exists():
+            port = settings.get('port')
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise ValueError('主控端口配置无效')
+            # An authentication or JSON error is not proof that a listener has
+            # exited. Refuse migration while anything still owns its local port.
+            try:
+                connection = socket.create_connection(('127.0.0.1', port), timeout=2)
+            except ConnectionRefusedError:
+                pass
+            else:
+                connection.close()
+                return dict(result, running=True, status='unresponsive',
+                            detail='主控本机端口仍有服务运行，请停止后再安装')
+        return dict(result, status='stopped', ready_for_install=True,
+                    detail='本机主控已停止，可以安装新版本；实验数据将保留')
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, OverflowError, AttributeError) as error:
+        return dict(result, status='unknown', ready_for_install=False,
+                    detail='无法确认本机主控已停止，暂不安装：' + str(error)[:300])
 
 
 def controller_stop_for_update(root):
@@ -232,7 +311,9 @@ def controller_serve(root, port, host):
                     if saved or candidate == port + 19:
                         raise RuntimeError('主控端口已占用；请选择原主控数据目录，或关闭占用端口的程序') from None
             atomic_json(root / 'launcher.json', {'host': host, 'port': server.server_address[1]})
-            atomic_json(root / 'desktop-process.json', {'pid': os.getpid(), 'nonce': nonce, 'started': time.time()})
+            atomic_json(root / 'desktop-process.json', {'pid': os.getpid(), 'nonce': nonce, 'started': time.time(),
+                                                       'version': __version__,
+                                                       'update_stop_protocol': UPDATE_STOP_PROTOCOL})
             root.joinpath('desktop-pending.json').unlink(missing_ok=True)
             stopped = threading.Event()
 
@@ -290,7 +371,8 @@ def main():
             stream.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('controller-start', 'controller-stop', 'controller-status', 'controller-serve',
-                                         'controller-open', 'controller-update-status', 'controller-stop-for-update'))
+                                         'controller-open', 'controller-update-status', 'controller-install-status',
+                                         'controller-stop-for-update'))
     parser.add_argument('--root', default=str(default_controller_root()))
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--host', default='0.0.0.0')
@@ -307,11 +389,13 @@ def main():
             result = controller_stop(args.root)
         elif args.action == 'controller-update-status':
             result = controller_update_status(args.root)
+        elif args.action == 'controller-install-status':
+            result = controller_install_status(args.root)
         elif args.action == 'controller-stop-for-update':
             result = controller_stop_for_update(args.root)
         elif args.action == 'controller-open':
             result = controller_start(args.root, args.port, args.host)
-            if result.get('running'):
+            if result.get('responsive'):
                 from .launcher import browser_url
                 result['url'] = browser_url(args.root, result['port'])
         else:

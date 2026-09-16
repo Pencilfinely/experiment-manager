@@ -12,6 +12,38 @@ const viewLabels={overview:['总览','实验、算力和算法项目，都在这
 const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
 function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
+let timingClock = {server: Date.now()/1000, local: performance.now()};
+function setTimingClock(timestamp) {
+  if(Number.isFinite(timestamp))timingClock={server:timestamp,local:performance.now()};
+}
+function timingNow() { return timingClock.server+(performance.now()-timingClock.local)/1000; }
+function updateTimer(element) {
+  const job=element.experimentJob, worker=(state.nodes||[]).find(item=>item.id===job.node_id);
+  const online=!!worker&&timingNow()-worker.last_seen<=45;
+  const display=ExperimentTiming.describe(job,timingNow(),online);
+  element.querySelector('.timer-value').textContent=display.text;
+  element.querySelector('.timer-note').textContent=display.note;
+  element.classList.toggle('timer-live',display.live);
+  element.title=display.note;
+}
+function jobTimer(job) {
+  const element=node('span',undefined,'experiment-timer');element.experimentJob=job;
+  element.append(node('span',undefined,'timer-value'),node('small',undefined,'timer-note'));
+  updateTimer(element);return element;
+}
+function updateTimers() { if(token)document.querySelectorAll('.experiment-timer').forEach(updateTimer); }
+function formatTimestamp(value) {
+  if(!Number.isFinite(value))return '—';
+  return new Date(value*1000).toLocaleString('zh-CN',{hour12:false});
+}
+function renderTimingDetail(job) {
+  $('detail-elapsed').replaceChildren(jobTimer(job));
+  $('detail-created').textContent=formatTimestamp(job.created);
+  $('detail-started').textContent=formatTimestamp(job.timing?.started_at);
+  $('detail-finished').textContent=formatTimestamp(job.timing?.finished_at);
+  $('detail-timing-note').textContent='只累计实验运行时间，不含排队、资源准备和停止期间。运行中时长为估算，停止后以算力端记录为准。'
+    +(job.timing?.complete===false?' 此实验的历史计时不完整。':!job.timing?' 旧实验或尚未更新的算力端可能没有计时记录。':'');
+}
 async function api(path, body) { const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});if(!response.ok){let msg=await response.text();try{const data=JSON.parse(msg);msg=data.error||data.message||msg;}catch{}throw new Error(msg);}return response.json(); }
 function showView(view){
   if(!viewLabels[view])view='overview';currentView=view;
@@ -158,7 +190,7 @@ $('pair-form').onsubmit=async event=>{
     $('pair-form').hidden=true;await refresh();
   }catch(error){notify('配对失败 / Pairing failed: '+error.message);}
 };
-async function refresh(){if(!token)return;try{state=await api('/api/state');$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
+async function refresh(){if(!token)return;try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
 function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
   $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单和启动新任务':online(n)?'允许运行 · 本地策略仍需满足':'已有任务保持归属，等待重新连接'));
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
@@ -173,12 +205,12 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
   renderProjects();renderJobs();renderOverview();
 }
-function renderJobs(){const filter=$('filter').value.toLowerCase();const jobs=(state.jobs||[]).filter(j=>JSON.stringify([j.spec.name,j.spec.algorithm,j.spec.group]).toLowerCase().includes(filter));$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;for(const j of jobs){const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`));const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));const met=j.metrics||{};row.append(title,status,node('td',j.node_id||'等待匹配'),node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));row.onclick=()=>detail(j.id,true);$('jobs').append(row);}}
+function renderJobs(){const filter=$('filter').value.toLowerCase();const jobs=(state.jobs||[]).filter(j=>JSON.stringify([j.spec.name,j.spec.algorithm,j.spec.group]).toLowerCase().includes(filter));$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;for(const j of jobs){const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`));const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));const met=j.metrics||{};row.append(title,status,node('td',j.node_id||'等待匹配'),(()=>{const cell=node('td');cell.append(jobTimer(j));return cell;})(),node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));row.onclick=()=>detail(j.id,true);$('jobs').append(row);}}
 $('filter').oninput=renderJobs;
 $('submit-form').onsubmit=async event=>{event.preventDefault();$('submit-button').disabled=true;try{const spec=JSON.parse($('spec').value),grid=JSON.parse($('grid').value||'{}'),request_id=globalThis.crypto?.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random();const result=await api('/api/jobs',{spec,grid,request_id});notify(`已提交 ${result.ids.length} 个实验。没有符合环境、数据和节点策略的机器时，实验会保留在队列。`);await refresh();}catch(error){notify('提交失败：'+error.message);}finally{$('submit-button').disabled=false;}};
 async function download(path,name){try{const response=await fetch(path,{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw new Error(await response.text());const objectURL=URL.createObjectURL(await response.blob()),a=node('a');a.href=objectURL;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(objectURL),1000);}catch(e){notify(e.message);}}
 $('export').onclick=()=>download('/api/results.csv','实验结果.csv');
-async function detail(id,scroll){selected=id;try{const data=await api('/api/job?id='+encodeURIComponent(id)),j=data.job||data;$('detail').hidden=false;$('detail-name').textContent=j.spec.name;$('detail-state').textContent=`${names[j.state]||j.state} · 节点 ${j.node_id||'未分配'} · 尝试 ${j.attempt||1} · ${typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||'')}`;$('detail-spec').textContent=JSON.stringify({id:j.id,source:j.spec.source,params:j.spec.params,resources:j.spec.resources,environments:j.spec.environments,metric_protocol:j.spec.metric_protocol},null,2);
+async function detail(id,scroll){selected=id;try{const data=await api('/api/job?id='+encodeURIComponent(id)),j=data.job||data;setTimingClock(data.time);renderTimingDetail(j);$('detail').hidden=false;$('detail-name').textContent=j.spec.name;$('detail-state').textContent=`${names[j.state]||j.state} · 节点 ${j.node_id||'未分配'} · 尝试 ${j.attempt||1} · ${typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||'')}`;$('detail-spec').textContent=JSON.stringify({id:j.id,source:j.spec.source,params:j.spec.params,resources:j.spec.resources,environments:j.spec.environments,metric_protocol:j.spec.metric_protocol},null,2);
   const events=data.events||j.events||[];$('events').textContent=events.slice(-30).map(e=>JSON.stringify(e)).join('\n');$('actions').replaceChildren();const options=terminal.includes(j.state)?(['paused','interrupted','failed'].includes(j.state)&&j.spec.resume_supported!==false?[['resume','从检查点恢复']]:[]):[[j.spec.resume_supported===false?'cancel':'stop',j.spec.resume_supported===false?'停止实验（无续训）':'请求保存并停止'],...(j.spec.resume_supported===false?[]:[['cancel','取消实验']])];for(const [action,label] of options){const b=node('button',label,'subtle');b.onclick=async()=>{try{await api('/api/action',{job_id:id,action});notify('请求已记录；节点收到并执行后才会更新状态。离线节点不会立即响应。');await detail(id,false);}catch(e){notify(e.message);}};$('actions').append(b);}
   $('artifacts').replaceChildren();for(const a of data.artifacts||j.artifacts||[]){const b=node('button',`${a.name} · ${(a.size/1024).toFixed(1)} KiB`,'subtle');b.onclick=()=>download('/api/artifact?job_id='+encodeURIComponent(id)+'&sha256='+encodeURIComponent(a.sha256),a.name.split('/').pop());$('artifacts').append(b);}if(!$('artifacts').children.length)$('artifacts').append(node('p','还没有完整回传的文件。运行状态与文件归档分别同步。','muted'));
   document.getElementById("live-log").textContent=j.log_tail||'等待节点回传日志';metricData=events.map(e=>e.metrics||e.data?.metrics||e.payload?.metrics||{}).filter(m=>Number.isFinite(m.step));if(j.metrics&&Number.isFinite(j.metrics.step))metricData.push(j.metrics);const unique=new Map(metricData.map(m=>[m.step,m]));metricData=[...unique.values()].sort((a,b)=>a.step-b.step);const old=$('metric-select').value,keys=[...new Set(metricData.flatMap(m=>Object.keys(m)))].filter(k=>!['step','time','attempt'].includes(k));$('metric-select').replaceChildren(...keys.map(k=>{const o=node('option',k);o.value=k;return o;}));if(keys.includes(old))$('metric-select').value=old;drawChart();if(scroll)$('detail').scrollIntoView({behavior:'smooth',block:'start'});
@@ -197,7 +229,7 @@ function renderOverview(){
   $('recent-jobs').replaceChildren();
   for(const job of (state.jobs||[]).slice(0,5)){
     const row=node('div',undefined,'list-row clickable'),label=node('div');label.append(node('strong',job.spec.name),node('small',`${job.spec.algorithm} · ${job.node_id||'等待分配节点'}`));
-    row.append(label,node('span',names[job.state]||job.state,'badge '+job.state));row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label','查看实验 '+job.spec.name);row.onclick=()=>{showView('experiments');void detail(job.id,true);};row.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();row.click();}};$('recent-jobs').append(row);
+    const summary=node('div',undefined,'recent-job-status');summary.append(jobTimer(job),node('span',names[job.state]||job.state,'badge '+job.state));row.append(label,summary);row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label','查看实验 '+job.spec.name);row.onclick=()=>{showView('experiments');void detail(job.id,true);};row.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();row.click();}};$('recent-jobs').append(row);
   }
   if(!$('recent-jobs').children.length)$('recent-jobs').append(node('p','这里会显示最近的实验。先导入算法，或从项目库创建一次运行。','muted'));
 }
@@ -333,4 +365,4 @@ async function saveImport(publish){
 }
 $('import-save').onclick=()=>void saveImport(false);
 $('import-review-form').onsubmit=event=>{event.preventDefault();void saveImport(true);};
-showView(location.hash.slice(1));refresh();setInterval(refresh,5000);
+showView(location.hash.slice(1));refresh();setInterval(refresh,5000);setInterval(updateTimers,1000);

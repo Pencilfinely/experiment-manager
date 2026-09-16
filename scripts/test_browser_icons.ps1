@@ -11,6 +11,10 @@ $source = Join-Path $testRoot 'ProfileTests.cs'
 @'
 using System;
 using System.Drawing;
+using System.Collections;
+using System.Diagnostics;
+using System.Reflection;
+using System.Windows.Forms;
 using ExperimentManagerDesktop;
 namespace ExperimentManagerDesktop {
     static class App {
@@ -20,7 +24,7 @@ namespace ExperimentManagerDesktop {
 static class ProfileTests {
     static int count;
     static void Check(bool result,string label) { if(!result)throw new Exception(label);count++; }
-    static int Main() {
+    [STAThread] static int Main() {
         string profile=@"C:\Users\Test User\ExperimentManager\desktop\Controller\web-profile";
         string command="\"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe\" --app=http://127.0.0.1:8765/ --user-data-dir=\""+profile+"\"";
         Check(BrowserAppWindow.MatchesProfile(command,profile),"quoted exact profile");
@@ -38,6 +42,27 @@ static class ProfileTests {
         Check(!BrowserAppWindow.MatchesProfile(command,""),"empty expected profile excluded");
         Check(!BrowserAppWindow.MatchesProfile(null,profile),"missing command line excluded");
         Check(BrowserAppWindow.CanonicalPath("C:\\invalid\0path")=="","invalid path fails closed");
+        // Use hidden test-owned native windows to verify the actual WM_CLOSE
+        // path. No browser or WMI discovery is involved in these fixtures.
+        using(var tracked=new BrowserAppWindow(@"C:\test-edge.exe",profile))
+        using(var owned=new Form())using(var unrelated=new Form())using(var stale=new Form())
+        using(var process=Process.GetCurrentProcess()) {
+            var ownedHandle=owned.Handle;var unrelatedHandle=unrelated.Handle;var staleHandle=stale.Handle;
+            var identities=(IDictionary)typeof(BrowserAppWindow).GetField("windows",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(tracked);
+            var identityType=typeof(BrowserAppWindow).GetNestedType("WindowIdentity",BindingFlags.NonPublic);
+            foreach(var window in new[]{ownedHandle,staleHandle}) {
+                object identity=Activator.CreateInstance(identityType,true);
+                identityType.GetField("Pid",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(identity,process.Id);
+                identityType.GetField("Started",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(identity,
+                    process.StartTime.ToUniversalTime().Ticks+(window==staleHandle?1:0));
+                identities.Add(window,identity);
+            }
+            typeof(BrowserAppWindow).GetMethod("RequestCloseTrackedWindows",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(tracked,null);
+            Application.DoEvents();
+            Check(owned.IsDisposed,"verified native window closed");
+            Check(!unrelated.IsDisposed,"untracked native window preserved");
+            Check(!stale.IsDisposed,"reused process identity preserved");
+        }
         Console.WriteLine("Browser profile guard: "+count+" assertions passed.");
         return 0;
     }

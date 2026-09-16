@@ -90,6 +90,13 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(job["node_id"], "worker")
             self.assertEqual(job["attempt"], 1)
             self.assertEqual(job["metrics"]["step"], 30)
+            record = next(item for item in self.agent.records() if item["id"] == identity)
+            timing = job["timing"]
+            self.assertTrue(timing["complete"])
+            self.assertGreater(timing["elapsed_seconds"], 0)
+            self.assertEqual(timing["elapsed_seconds"], record["_timing"]["elapsed_seconds"])
+            self.assertLessEqual(timing["started_at"], timing["finished_at"])
+            self.assertLessEqual(timing["finished_at"], timing["observed_at"])
             for item in job["artifacts"]:
                 path = self.hub.artifact(identity, item["sha256"])
                 self.assertEqual(sha256_file(path), item["sha256"])
@@ -119,11 +126,21 @@ class IntegrationTests(unittest.TestCase):
         self.pump(lambda: self.agent.records() and self.agent.records()[0].get("metrics", {}).get("step", 0) >= 3)
         self.hub.action({"job_id": identity, "action": "stop"})
         self.pump(lambda: self.hub.job(identity)["state"] == "paused")
+        paused = self.hub.job(identity)["timing"]
+        self.assertTrue(paused["complete"])
+        self.assertGreater(paused["elapsed_seconds"], 0)
+        self.agent.tick()
+        self.assertEqual(self.hub.job(identity)["timing"]["elapsed_seconds"], paused["elapsed_seconds"])
         self.assertTrue((self.agent.root / "runs" / identity / "checkpoint.json").exists())
         self.hub.action({"job_id": identity, "action": "resume"})
         self.pump(lambda: self.hub.job(identity)["state"] == "succeeded")
         self.assertEqual(self.hub.job(identity)["attempt"], 2)
         self.assertEqual(self.hub.job(identity)["metrics"]["step"], 70)
+        completed = self.hub.job(identity)["timing"]
+        self.assertTrue(completed["complete"])
+        self.assertEqual(completed["started_at"], paused["started_at"])
+        self.assertGreater(completed["elapsed_seconds"], paused["elapsed_seconds"])
+        self.assertGreater(completed["finished_at"], paused["finished_at"])
 
 
 if __name__ == "__main__":
