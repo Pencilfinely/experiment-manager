@@ -112,6 +112,18 @@ def validate_task(spec):
             raise ValueError(f"{field} must be a list of versioned names (letters, digits, _, ., -)")
         result[field] = list(dict.fromkeys(values))
     result["priority"] = _number(result.get("priority", 0), "priority", -100, 100, True)
+    result["scheduling"] = validate_scheduling(result.get("scheduling", {}))
+    if "asset_aliases" in result:
+        aliases = result["asset_aliases"]
+        if not isinstance(aliases, dict) or len(aliases) > 100 or any(
+                not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", value)
+                or not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", key)
+                for key, value in aliases.items()):
+            raise ValueError("asset_aliases must map asset names to versioned asset identifiers")
+    if "deployment_tags" in result and (not isinstance(result["deployment_tags"], list) or any(
+            not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", tag)
+            for tag in result["deployment_tags"])):
+        raise ValueError("deployment_tags must be a list of tag names")
     resources = result.setdefault("resources", {})
     if not isinstance(resources, dict):
         raise ValueError("resources must be an object")
@@ -156,10 +168,38 @@ def validate_task(spec):
             raise ValueError("Demo backend only runs the bundled demonstration")
         if resources["gpu_memory_mb"] != 0:
             raise ValueError("Demo does not execute on a GPU")
+        if result["scheduling"]["gpu_uuids"]:
+            raise ValueError("Demo tasks cannot select GPUs")
         params = result["params"]
         _number(params.get("steps", 10), "steps", 1, 10000, True)
         _number(params.get("delay", 0.2), "delay", 0, 60)
         _number(params.get("seed", 42), "seed", 0, 2**32 - 1, True)
+    return result
+
+
+def validate_scheduling(value):
+    """Node restrictions are enforced at assignment, GPU restrictions at admission."""
+    if not isinstance(value, dict):
+        raise ValueError("scheduling must be an object")
+    allowed = {"mode", "node_ids", "preferred_node_ids", "gpu_uuids"}
+    if set(value) - allowed:
+        raise ValueError("Unknown scheduling fields: " + ", ".join(sorted(set(value) - allowed)))
+    result = copy.deepcopy(value)
+    mode = result.setdefault("mode", "auto")
+    if mode not in ("auto", "assisted", "manual"):
+        raise ValueError("scheduling.mode must be auto, assisted or manual")
+    for field in ("node_ids", "preferred_node_ids", "gpu_uuids"):
+        values = result.setdefault(field, [])
+        limit = 200 if field == "gpu_uuids" else 64
+        if not isinstance(values, list) or len(values) > 100 or any(
+                not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0," + str(limit - 1) + "}", item)
+                for item in values):
+            raise ValueError("scheduling." + field + " must be a list of valid identifiers")
+        result[field] = list(dict.fromkeys(values))
+    if mode == "manual" and len(result["node_ids"]) != 1:
+        raise ValueError("Manual allocation requires exactly one node_id")
+    if result["node_ids"] and not set(result["preferred_node_ids"]).issubset(result["node_ids"]):
+        raise ValueError("Preferred nodes must belong to the candidate node list")
     return result
 
 

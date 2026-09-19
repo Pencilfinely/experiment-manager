@@ -25,6 +25,7 @@ jobs:
       - run: python -m compileall -q expman scripts
       - run: node --check expman/static/app.js
       - run: node tests/test_timing_ui.js
+      - run: node tests/test_matrix_ui.js
       - name: Native Windows desktop transport and role tests
         if: runner.os == 'Windows'
         shell: pwsh

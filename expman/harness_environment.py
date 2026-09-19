@@ -16,6 +16,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from . import common
+
 
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)")
@@ -183,6 +185,12 @@ class _Docker:
         if len(digests) != 1:
             raise ValueError("Dependency image push did not return a unique registry digest")
         reference = registry + "/expman-harness@" + digests.pop()
+        # Keep provenance even if pulling/verifying the new runtime fails later.
+        receipt_path = self.root / "owned-images.json"
+        receipts = common.read_json(receipt_path, [])
+        receipt = {"image": reference, "image_tag": tag, "build_key": key}
+        if receipt not in receipts:
+            common.atomic_json(receipt_path, receipts + [receipt])
         self.command(["docker", "pull", reference], timeout=7200)
         return reference, key
 
@@ -236,7 +244,9 @@ def ensure_environment(runtime, node_config, storage_root):
                 derived_name = "harness-" + key[:20] + "-" + gpu_key
                 new_profile = {"image": image, "verified": True,
                                "gpu_name_patterns": gpu_names,
-                               "base_profile": name, "requirements": runtime["requirements"], "imports": runtime["imports"]}
+                               "base_profile": name, "requirements": runtime["requirements"], "imports": runtime["imports"],
+                               "managed_by": "external-harness-project",
+                               "image_tag": image.split("@", 1)[0] + ":" + key[:24]}
                 previous = config["profiles"].get(derived_name)
                 if previous:
                     if any(previous.get(field) != new_profile[field] for field in ("image", "verified", "gpu_name_patterns", "requirements")):

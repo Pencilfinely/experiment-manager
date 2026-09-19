@@ -66,7 +66,7 @@ def inspect_update_state(db):
         "pending_archives": sum(record["state"] in TERMINAL and record.get("archive_scanned") is not True
                                 for record in records),
         "pending_uploads": pending_uploads,
-        "pending_projects": sum(item["status"] not in ("installed", "failed") for item in projects.values()),
+        "pending_projects": sum(item["status"] not in ("installed", "failed", "deleted", "delete_failed") for item in projects.values()),
     }
     return {"ready_for_update": not any(counts.values()), **counts}
 
@@ -317,7 +317,7 @@ class Agent:
                   "disk_free_mb": shutil.disk_usage(self.root).free // (1024 * 1024),
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
                   "platform": sys.platform, "docker_available": False}
-        result["capabilities"] = ["project-bundle-v1"] if sys.platform == "linux" else []
+        result["capabilities"] = ["scheduler-v2", "project-delete-v1"] + (["project-bundle-v1"] if sys.platform == "linux" else [])
         result["pending_uploads"] = (self.db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
                                      if hasattr(self, "db") else None)
         # The controller must not infer a finished archive from a terminal job

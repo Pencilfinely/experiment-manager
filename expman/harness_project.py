@@ -323,6 +323,14 @@ def _git(repo, *args):
     return result.stdout.strip()
 
 
+def bundle_asset_aliases(manifest):
+    """Stable asset identifiers shared by every deployment of a bundle."""
+    return {alias: 'hdata-' + manifest['project_id'][:30] + '-' + alias[:20] + '-' +
+            _digest(_encoded({name: value for name, value in manifest['files'].items()
+                             if name.startswith('assets/' + alias + '/')}))[:16]
+            for alias in manifest.get('assets', {})}
+
+
 def install_bundle(bundle, storage_root, node_config):
     """Install a content-addressed copy; return config without touching a live agent."""
     manifest = read_bundle(bundle)
@@ -331,10 +339,16 @@ def install_bundle(bundle, storage_root, node_config):
     with InstanceLock(storage_root / 'install.lock'):
         root = common.safe_child(storage_root, manifest['project_id'] + '/' + manifest['bundle_id'])
         repo = common.safe_child(root, 'repository')
-        aliases = {alias: 'hdata-' + manifest['project_id'][:30] + '-' + alias[:20] + '-' +
-            _digest(_encoded({name: value for name, value in manifest['files'].items()
-                             if name.startswith('assets/' + alias + '/')}))[:16]
-                   for alias in manifest.get('assets', {})}
+        aliases = bundle_asset_aliases(manifest)
+        # Durable ownership receipt also covers an interrupted installation.
+        root.mkdir(parents=True, exist_ok=True)
+        receipt = {'schema': 1, 'project_id': manifest['project_id'], 'bundle_id': manifest['bundle_id'],
+                   'assets': list(aliases.values()), 'profiles': {}}
+        receipt_path = root / '.expman-install.json'
+        previous_receipt = common.read_json(receipt_path)
+        if previous_receipt and (previous_receipt.get('project_id'), previous_receipt.get('bundle_id')) != (manifest['project_id'], manifest['bundle_id']):
+            raise ValueError('Installed project ownership receipt does not match')
+        common.atomic_json(receipt_path, previous_receipt or receipt)
         with zipfile.ZipFile(bundle) as archive:
             for name, expected in manifest['files'].items():
                 if name.startswith('source/'):
@@ -381,6 +395,11 @@ def install_bundle(bundle, storage_root, node_config):
         from .harness_environment import ensure_environment
         environment = ensure_environment(manifest.get('runtime', {}), copy.deepcopy(node_config), root / 'environment')
         config = environment['config']
+        config['deleted_project_bundles'] = [item for item in config.get('deleted_project_bundles', [])
+                                             if item != manifest['bundle_id']]
+        receipt['profiles'] = {choice['profile']: config.get('profiles', {}).get(choice['profile'], {})
+                               for choice in environment['environments']}
+        common.atomic_json(receipt_path, receipt)
         for alias, asset_id in aliases.items():
             config.setdefault('assets', {})[asset_id] = str(storage_root / 'assets' / asset_id)
         config['allowed_repos'] = list(dict.fromkeys(config.get('allowed_repos', []) + [str(repo)]))
@@ -394,8 +413,9 @@ def install_bundle(bundle, storage_root, node_config):
                 'experiment_id': experiment['id'], 'source': {'repo': str(repo), 'commit': commit},
                 'command': ['python', '/workspace/code/.expman/runtime/harness.py', 'run',
                     '--manifest', '/workspace/code/.expman/harness.json', '--source', '/workspace/code/project'],
-                'params': experiment['params'], 'assets': list(aliases.values()),
+                'params': experiment['params'], 'assets': list(aliases.values()), 'asset_aliases': aliases,
                 'environments': environment['environments'], 'tags': config.get('tags', []),
+                'deployment_tags': config.get('tags', []),
                 'resources': manifest['resources'], 'metric_protocol': 'external-log-rules-v1',
                 'resume_supported': manifest['harness'].get('resume', {}).get('supported', False)}))
         config['task_templates'] = [t for t in config.get('task_templates', [])

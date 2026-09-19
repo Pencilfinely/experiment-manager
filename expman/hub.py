@@ -26,7 +26,8 @@ import zipfile
 
 from . import __version__
 from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256_file, validate_task
-from .scheduler import choose_node
+from .scheduler import choose_assignment
+from .matrix import MatrixHubMixin, initialize as initialize_matrices
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -161,7 +162,7 @@ def inspect_update_state(db):
     uploads = db.execute("SELECT COUNT(*) FROM uploads u WHERE NOT EXISTS "
                          "(SELECT 1 FROM artifacts a WHERE a.job_id=u.job_id AND a.sha256=u.sha256)").fetchone()[0]
     projects = db.execute("SELECT COUNT(*) FROM project_uploads WHERE completed_digest IS NULL").fetchone()[0]
-    deployments = db.execute("SELECT COUNT(*) FROM project_deployments WHERE status NOT IN ('installed','failed')").fetchone()[0]
+    deployments = db.execute("SELECT COUNT(*) FROM project_deployments WHERE status NOT IN ('installed','failed','deleted','delete_failed')").fetchone()[0]
     uncertain = 0
     for row in db.execute("SELECT id,last_seen,snapshot FROM nodes"):
         node_id, last_seen, serialized = row
@@ -185,7 +186,7 @@ def inspect_update_state(db):
     return dict(ready_for_update=not reasons, detail="；".join(reasons) or "实验和文件回传已完成，可以安装更新", **counts)
 
 
-class Hub:
+class Hub(MatrixHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -252,8 +253,14 @@ class Hub:
             project_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(projects)")}
             if "bundle_id" not in project_columns:
                 self.db.execute("ALTER TABLE projects ADD COLUMN bundle_id TEXT NOT NULL DEFAULT ''")
+            if "deleted_at" not in project_columns:
+                self.db.execute("ALTER TABLE projects ADD COLUMN deleted_at REAL")
+            if "cleanup_error" not in project_columns:
+                self.db.execute("ALTER TABLE projects ADD COLUMN cleanup_error TEXT NOT NULL DEFAULT ''")
         for node_id in self.config["nodes"]:
             self.db.execute("INSERT OR IGNORE INTO nodes(id) VALUES (?)", (node_id,))
+        self._cleanup_project_archives()
+        initialize_matrices(self.db)
 
     @contextmanager
     def transaction(self):
@@ -267,6 +274,18 @@ class Hub:
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+
+    def ai_settings(self, payload=None):
+        from .ai_assist import AIAssist
+        return AIAssist(self).settings(payload)
+
+    def ai_test(self, payload):
+        from .ai_assist import AIAssist
+        return AIAssist(self).test(payload)
+
+    def import_assist(self, payload):
+        from .ai_assist import AIAssist
+        return AIAssist(self).assist(payload)
 
     @contextmanager
     def update_request(self):
@@ -377,13 +396,18 @@ class Hub:
                 item["snapshot"] = json.loads(item["snapshot"])
                 item["online"] = timestamp - item["last_seen"] <= 45
                 nodes.append(item)
-            projects = []
+            projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
                 project = dict(row)
                 project["deployments"] = [dict(item) for item in self.db.execute(
                     "SELECT node_id,revision,status,detail,updated FROM project_deployments WHERE digest=? ORDER BY node_id", (row["digest"],))]
-                projects.append(project)
-            return {"jobs": jobs, "nodes": nodes, "projects": projects, "time": timestamp, "version": __version__}
+                (project_deletions if project["deleted_at"] is not None else projects).append(project)
+            deleted_bundles = {item["bundle_id"] for item in project_deletions if item["bundle_id"]} - {item["bundle_id"] for item in projects}
+            for node in nodes:
+                node["snapshot"]["task_templates"] = [item for item in node["snapshot"].get("task_templates", [])
+                    if item.get("project_bundle_id") not in deleted_bundles]
+            return {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
+                    "time": timestamp, "version": __version__}
 
     def submit(self, payload):
         _object(payload, "request")
@@ -394,6 +418,7 @@ class Hub:
         specs = expand_grid(spec, payload["grid"]) if "grid" in payload else [spec]
         fingerprint = hashlib.sha256(_json(specs).encode()).hexdigest()
         with self.transaction():
+            self._validate_scheduling_nodes(specs)
             previous = self.db.execute("SELECT * FROM submissions WHERE request_id=?", (request_id,)).fetchone()
             if previous:
                 if previous["fingerprint"] != fingerprint:
@@ -427,6 +452,8 @@ class Hub:
             raise APIError(400, "action must be stop, resume or cancel")
         with self.transaction():
             row = self._find_job(payload.get("job_id"))
+            if action == "resume" and self._project_is_deleted(json.loads(row["spec"])):
+                raise APIError(409, "This project was deleted; import and deploy it again before submitting a new experiment")
             if action == "resume" and json.loads(row["spec"]).get("resume_supported") is False:
                 raise APIError(409, "This algorithm does not provide configured native resume; submit a new experiment")
             if row["action"] == action and row["command_id"] > row["command_ack"]:
@@ -454,7 +481,9 @@ class Hub:
 
     def _assign(self):
         nodes = []
-        for row in self.db.execute("SELECT * FROM nodes WHERE mode='run'"):
+        # Drained source nodes still supply legacy deployment metadata needed
+        # to rebind their templates; choose_assignment filters destinations.
+        for row in self.db.execute("SELECT * FROM nodes"):
             item = dict(row)
             item["snapshot"] = json.loads(item["snapshot"])
             nodes.append(item)
@@ -465,10 +494,11 @@ class Hub:
         pending = list(self.db.execute("SELECT id,spec,created FROM jobs WHERE state='queued' AND node_id IS NULL"))
         pending.sort(key=lambda row: (-json.loads(row["spec"])["priority"], row["created"], row["id"]))
         for row in pending:
-            node_id = choose_node(json.loads(row["spec"]), nodes, counts)
-            if node_id is None:
+            assignment = choose_assignment(json.loads(row["spec"]), nodes, counts)
+            if assignment is None:
                 continue
-            self.db.execute("UPDATE jobs SET node_id=?,state='assigned',updated=? WHERE id=?", (node_id, now(), row["id"]))
+            node_id = assignment["node_id"]
+            self.db.execute("UPDATE jobs SET node_id=?,spec=?,state='assigned',updated=? WHERE id=?", (node_id, _json(assignment["spec"]), now(), row["id"]))
             counts[node_id] = counts.get(node_id, 0) + 1
             self._event(row["id"], "assigned", {"node_id": node_id})
 
@@ -490,12 +520,15 @@ class Hub:
                 digest = self._project_digest(report.get("digest"))
                 revision = _integer(report.get("revision"), "revision", 1)
                 status, detail = report.get("status"), report.get("detail", "")
-                if status not in ("downloading", "installing", "installed", "failed") or not isinstance(detail, str) or len(detail) > 1000:
+                if status not in ("downloading", "installing", "installed", "failed", "deleting", "deleted", "delete_failed") or not isinstance(detail, str) or len(detail) > 1000:
                     raise APIError(400, "Invalid project installation report")
-                owned = self.db.execute("SELECT revision FROM project_deployments WHERE digest=? AND node_id=?", (digest, node_id)).fetchone()
+                owned = self.db.execute("SELECT d.revision,d.status,p.deleted_at FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.digest=? AND d.node_id=?", (digest, node_id)).fetchone()
                 if not owned:
                     raise APIError(403, "Project was not deployed to this node")
-                project_checked.append((digest, revision, status, detail))
+                deleting = owned["deleted_at"] is not None
+                if (revision == owned["revision"] and deleting == (status in ("deleting", "deleted", "delete_failed"))
+                        and (owned["status"] not in ("deleted", "delete_failed") or status == owned["status"])):
+                    project_checked.append((digest, revision, status, detail))
             # Validate the entire batch before accepting any report or heartbeat.
             checked = []
             for report in reports:
@@ -562,9 +595,12 @@ class Hub:
                     jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
             deployments = [dict(row) for row in self.db.execute(
-                "SELECT d.digest,p.size,d.revision FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed') ORDER BY d.updated LIMIT 100", (node_id,))]
+                "SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed') ORDER BY d.updated LIMIT 100", (node_id,))]
+            capabilities = snapshot.get("capabilities", [])
+            deployments = [item for item in deployments if
+                ("project-delete-v1" if item["action"] == "delete" else "project-bundle-v1") in capabilities]
             return {"jobs": jobs, "mode": mode, "ack": ack,
-                    "project_deployments": deployments if "project-bundle-v1" in snapshot.get("capabilities", []) else []}
+                    "project_deployments": deployments}
 
     @staticmethod
     def _project_digest(value):
@@ -612,6 +648,8 @@ class Hub:
                     raise APIError(409, "upload_id already identifies another upload")
                 if row and row["completed_digest"]:
                     project = self.db.execute("SELECT * FROM projects WHERE digest=?", (row["completed_digest"],)).fetchone()
+                    if project["deleted_at"] is not None:
+                        raise APIError(409, "This upload belongs to a deleted project; start a new import/upload")
                     return {"offset": size, "complete": True, "project": dict(project)}
                 self.db.execute("INSERT OR IGNORE INTO project_uploads VALUES (?,?,?,NULL)", (upload_id, size, expected))
                 partial = safe_child(self.root, f"project-partials/{upload_id}.part")
@@ -641,6 +679,17 @@ class Hub:
             final = safe_child(self.root, f"projects/{digest}.zip")
             final.parent.mkdir(parents=True, exist_ok=True)
             with self.transaction():
+                pending = self.db.execute("SELECT 1 FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE p.bundle_id=? AND p.deleted_at IS NOT NULL AND d.status!='deleted'", (manifest.get("bundle_id", ""),)).fetchone()
+                if pending:
+                    partial.unlink(missing_ok=True)
+                    raise APIError(409, "Wait for all workers to finish deleting this snapshot before importing it again")
+                deleted = self.db.execute("SELECT deleted_at FROM projects WHERE digest=?", (digest,)).fetchone()
+                if deleted and deleted["deleted_at"] is not None:
+                    pending = self.db.execute("SELECT 1 FROM project_deployments WHERE digest=? AND status!='deleted'", (digest,)).fetchone()
+                    if pending:
+                        partial.unlink(missing_ok=True)
+                        raise APIError(409, "Wait for all workers to finish deleting this project before importing the identical bundle again")
+                    self.db.execute("UPDATE projects SET deleted_at=NULL,cleanup_error='',created=? WHERE digest=?", (now(), digest))
                 os.replace(partial, final)
                 self.db.execute("INSERT OR IGNORE INTO projects(digest,project_id,name,size,created,bundle_id) VALUES (?,?,?,?,?,?)", (digest, manifest["project_id"], manifest["name"], size, now(), manifest.get("bundle_id", "")))
                 self.db.execute("UPDATE project_uploads SET completed_digest=? WHERE id=?", (digest, upload_id))
@@ -653,7 +702,7 @@ class Hub:
         if not isinstance(node_ids, list) or not 1 <= len(node_ids) <= 100 or any(not isinstance(item, str) for item in node_ids):
             raise APIError(400, "Select 1-100 worker node IDs")
         with self.transaction():
-            if not self.db.execute("SELECT 1 FROM projects WHERE digest=?", (digest,)).fetchone():
+            if not self.db.execute("SELECT 1 FROM projects WHERE digest=? AND deleted_at IS NULL", (digest,)).fetchone():
                 raise APIError(404, "Upload this project before deploying")
             for node_id in set(node_ids):
                 row = self.db.execute("SELECT snapshot FROM nodes WHERE id=?", (node_id,)).fetchone()
@@ -665,11 +714,78 @@ class Hub:
                 self.db.execute("INSERT INTO project_deployments VALUES (?,?,1,'queued','',?) ON CONFLICT(digest,node_id) DO UPDATE SET revision=revision+1,status='queued',detail='',updated=excluded.updated", (digest, node_id, now()))
         return {"digest": digest, "node_ids": sorted(set(node_ids)), "status": "queued"}
 
+    def _project_is_deleted(self, spec):
+        bundle_id = spec.get("project_bundle_id")
+        return bool(bundle_id and self.db.execute(
+            "SELECT 1 FROM projects WHERE bundle_id=? AND deleted_at IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM projects WHERE bundle_id=? AND deleted_at IS NULL)",
+            (bundle_id, bundle_id)).fetchone())
+
+    def project_delete(self, payload):
+        """Hide immediately and retain a durable per-worker cleanup tombstone."""
+        digest = self._project_digest(payload.get("digest"))
+        if not isinstance(payload.get("retry", False), bool):
+            raise APIError(400, "retry must be a boolean")
+        with self.transaction():
+            project = self.db.execute("SELECT * FROM projects WHERE digest=?", (digest,)).fetchone()
+            if project is None:
+                raise APIError(404, "Unknown project")
+            bundle_id = project["bundle_id"]
+            if not bundle_id:
+                from .harness_project import read_bundle
+                bundle_id = read_bundle(safe_child(self.root, f"projects/{digest}.zip"))["bundle_id"]
+                self.db.execute("UPDATE projects SET bundle_id=? WHERE digest=?", (bundle_id, digest))
+            # Different ZIP encodings may name the same installed snapshot. Its
+            # packages share a lifecycle, so no alias can redeploy a deleted copy.
+            aliases = [row[0] for row in self.db.execute("SELECT digest FROM projects WHERE bundle_id=? AND (? IS NULL OR deleted_at IS NOT NULL)", (bundle_id, project['deleted_at']))]
+            for row in self.db.execute("SELECT id,spec,state,command_id,command_ack FROM jobs"):
+                if project["deleted_at"] is None and json.loads(row["spec"]).get("project_bundle_id") == bundle_id and (
+                        row["state"] not in TERMINAL or row["command_id"] > row["command_ack"]):
+                    raise APIError(409, "Stop or cancel this project's active experiments and wait for worker acknowledgement before deleting: " + row["id"])
+            timestamp = now()
+            for alias in aliases:
+                changed = self.db.execute("UPDATE projects SET deleted_at=? WHERE digest=? AND deleted_at IS NULL", (timestamp, alias)).rowcount
+                if changed:
+                    self.db.execute("UPDATE project_deployments SET revision=revision+1,status='delete_pending',detail='Waiting for worker cleanup; offline workers retry on reconnect. Older workers need an upgrade.',updated=? WHERE digest=?", (timestamp, alias))
+                elif payload.get("retry"):
+                    self.db.execute("UPDATE project_deployments SET revision=revision+1,status='delete_pending',detail='Cleanup retry requested',updated=? WHERE digest=? AND status='delete_failed'", (timestamp, alias))
+            deployments = [dict(row) for row in self.db.execute(
+                "SELECT d.digest,d.node_id,d.revision,d.status,d.detail,d.updated FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE p.bundle_id=? AND p.deleted_at IS NOT NULL ORDER BY d.node_id,d.digest", (bundle_id,))]
+        # Commit deletion intent before unlinking any copy. Replays and Hub
+        # restart finish interrupted controller cleanup without reviving a file.
+        self._cleanup_project_archives(aliases)
+        with self.lock:
+            errors = [row[0] for row in self.db.execute("SELECT cleanup_error FROM projects WHERE bundle_id=? AND cleanup_error!=''", (bundle_id,))]
+        return {"digest": digest, "deleted": True, "cleanup_pending": bool(errors) or any(item["status"] != "deleted" for item in deployments),
+                "deployments": deployments, "controller_cleanup_error": "; ".join(errors)}
+
+    def _cleanup_project_archives(self, digests=None):
+        with self.lock:
+            rows = list(self.db.execute("SELECT digest FROM projects WHERE deleted_at IS NOT NULL"))
+            for row in rows:
+                digest = row["digest"]
+                if digests is not None and digest not in digests:
+                    continue
+                error = ""
+                try:
+                    safe_child(self.root, f"projects/{digest}.zip").unlink(missing_ok=True)
+                    # Local import ZIPs are owned build products; source paths
+                    # and editable import drafts are never deletion targets.
+                    for state_file in (self.root / "imports").glob("*/state.json"):
+                        state = read_json(state_file, {})
+                        if state.get("project", {}).get("digest") != digest:
+                            continue
+                        for archive in state_file.parent.glob("bundle-*.zip"):
+                            safe_child(self.root, archive.relative_to(self.root).as_posix()).unlink(missing_ok=True)
+                except (OSError, ValueError) as failure:
+                    error = str(failure)[:1000]
+                self.db.execute("UPDATE projects SET cleanup_error=? WHERE digest=? AND deleted_at IS NOT NULL", (error, digest))
+
     def project_download(self, node_id, digest, offset):
         digest = self._project_digest(digest)
         offset = _integer(offset, "offset", 0, MAX_PROJECT_SIZE)
         with self.lock:
-            row = self.db.execute("SELECT p.size FROM projects p JOIN project_deployments d ON p.digest=d.digest WHERE p.digest=? AND d.node_id=?", (digest, node_id)).fetchone()
+            row = self.db.execute("SELECT p.size FROM projects p JOIN project_deployments d ON p.digest=d.digest WHERE p.digest=? AND d.node_id=? AND p.deleted_at IS NULL", (digest, node_id)).fetchone()
             if row is None:
                 raise APIError(403, "Project was not deployed to this node")
             if offset > row["size"]:
@@ -882,6 +998,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._send(hub.project_imports().listing())
                 elif path == "/api/local/imports/item":
                     self._send(hub.project_imports().item(parameter("id")))
+                elif path == "/api/ai/settings":
+                    self._send(hub.ai_settings())
                 elif path == "/api/node-info":
                     self._send({"node_id": node_id, "paired": True})
                 elif path == "/api/projects/download":
@@ -900,6 +1018,14 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._send(hub.job(parameter("id")))
                 elif path == "/api/results.csv":
                     self._bytes(hub.results_csv(), "text/csv; charset=utf-8", disposition='attachment; filename="results.csv"')
+                elif path == "/api/matrices":
+                    self._send(hub.matrices())
+                elif path == "/api/matrices/item":
+                    self._send(hub.matrix_item(parameter("id")))
+                elif path == "/api/matrices/report.md":
+                    identity = parameter("id")
+                    self._bytes(hub.matrix_report(identity), "text/markdown; charset=utf-8",
+                                disposition=f'attachment; filename="matrix-{identity}.md"')
                 elif path == "/api/artifact":
                     artifact = hub.artifact(parameter("job_id"), parameter("sha256"))
                     # Stream checkpoints without loading the whole file into RAM.
@@ -918,14 +1044,21 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          "/api/scheduling/preview": hub.scheduling_preview,
+                          "/api/matrices/save": hub.matrix_save, "/api/matrices/preview": hub.matrix_preview,
+                          "/api/matrices/start": hub.matrix_start, "/api/matrices/delete": hub.matrix_delete,
                           "/api/enroll": hub.enroll,
+                          "/api/ai/settings": hub.ai_settings, "/api/ai/test": hub.ai_test,
                           "/api/projects/upload": hub.project_upload, "/api/projects/deploy": hub.project_deploy,
+                          "/api/projects/delete": hub.project_delete,
                           "/api/sync": lambda p: hub.sync(node_id, p), "/api/upload": lambda p: hub.upload(node_id, p)}
                 if path.startswith("/api/local/imports/"):
                     imports = hub.project_imports()
                     routes.update({"/api/local/imports/start": imports.start,
                                    "/api/local/imports/browse": imports.browse,
                                    "/api/local/imports/save": imports.save,
+                                   "/api/local/imports/assist": hub.import_assist,
+                                   "/api/local/imports/test-metrics": imports.test_metrics,
                                    "/api/local/imports/publish": imports.publish})
                 if path not in routes:
                     raise APIError(404, "Not found")

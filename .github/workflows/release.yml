@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.3.0-rc.5
+        default: v0.4.0
 permissions:
   contents: write
 env:
@@ -27,6 +27,7 @@ jobs:
         run: python -c "import os; from scripts.build_release import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION"
       - run: python -m unittest discover -s tests -t . -v
       - run: node tests/test_timing_ui.js
+      - run: node tests/test_matrix_ui.js
       - name: Validate native desktop and updater
         shell: pwsh
         run: |
@@ -41,6 +42,10 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         shell: pwsh
         run: |
-          $assets = Get-ChildItem dist/*/* -File | ForEach-Object { $_.FullName }
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $assets = Get-ChildItem ('dist/' + $version + '/*') -File | ForEach-Object { $_.FullName }
           $notes = 'docs/RELEASE-' + $env:RELEASE_TAG.TrimStart('v') + '.md'
-          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --prerelease --title "Experiment Manager $env:RELEASE_TAG" --notes-file $notes
+          $releaseOptions = @('--verify-tag', '--draft', '--title', "Experiment Manager $env:RELEASE_TAG", '--notes-file', $notes)
+          if ($version.Contains('-')) { $releaseOptions += '--prerelease' }
+          gh release create $env:RELEASE_TAG @assets @releaseOptions
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release draft.' }

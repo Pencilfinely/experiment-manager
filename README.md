@@ -5,12 +5,12 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.3.0-rc.5 is a desktop preview.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-This version adds cumulative experiment timing, clearer update diagnostics and tray exit that stops the associated service. Updates start when you request them.
+**0.4.0 is available as a regular release.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+This version adds experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. See the [release notes](docs/RELEASE-0.4.0.md). Updates start when you request them.
 
 ## Download and install
 
-Get application installers or complete ZIPs from [GitHub Releases](https://github.com/Pencilfinely/experiment-manager/releases). GitHub's automatically generated Source code archives are not installers.
+Get application installers or complete ZIPs from the [latest release](https://github.com/Pencilfinely/experiment-manager/releases/latest). GitHub's automatically generated Source code archives are not installers.
 
 | Computer | Recommended asset suffix | Application | Prerequisites |
 |---|---|---|---|
@@ -26,7 +26,7 @@ First worker setup downloads large images; allow at least 8 GiB plus space for c
 
 ### 1. Open Experiment Center
 
-Start **Experiment Center**. Its sidebar contains Overview, Experiments, Compute, Algorithm Projects and Settings.
+Start **Experiment Center**. Its sidebar contains Overview, Experiments, Experiment Matrices, Compute, Algorithm Projects and Settings.
 The controller service runs in the background; closing the page window does not stop it. Reopen it through the application or tray.
 Local application launch signs you in automatically. You do not need to copy an administrator token or keep a terminal open.
 
@@ -57,6 +57,8 @@ Workers initiate connections to the controller and need no inbound worker port.
 3. Review the selected-file preview and **publish to the project library**. This records a fixed version of the code, data and configuration; it does not start training.
 4. Select online workers on the project card and **deploy**. Workers automatically prepare code, data and the Docker environment. Wait for installation to succeed.
 5. Choose **Create experiment**, select a preset and edit parameters. Submit a short test first, then follow progress, logs, metrics and result files in **Experiments**.
+
+Experiment matrices combine datasets and parameter values: save the configuration, preview allocation, launch a batch, and export Markdown results. Allocation supports automatic selection, candidate/preferred workers, and a manually selected worker/GPU. Import forms include optional AI advice, and project removal cleans managed deployments while preserving original files. See the [workflow guide (Chinese)](docs/EXPERIMENT-MATRICES.zh-CN.md).
 
 Local-folder import is available in the application on the controller computer. A remote browser can upload a prepared project ZIP; it cannot browse the controller's filesystem.
 
@@ -102,7 +104,7 @@ Workers can continue already assigned, cached tasks during a temporary controlle
 Preview versions check for newer previews and stable releases; stable versions check for stable releases only. Ubuntu workers continue to use a downloaded package and the existing script/manual upgrade procedure.
 
 Never run old and new agents against the same node directory at once. See [Everyday operations](docs/OPERATIONS.md) for upgrading, backups, background controls and troubleshooting.
-Use this preview on localhost or a trusted private network; it is not a public multi-tenant service.
+Use the application on localhost or a trusted private network; it is not a public multi-tenant service.
 
 ## Development and license
 

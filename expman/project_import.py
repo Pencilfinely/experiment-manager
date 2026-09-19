@@ -23,6 +23,40 @@ from .harness_project import MAX_BYTES, MAX_FILES, _files, _slug, build_project,
 
 BUSY = frozenset(("scanning", "saving", "building", "browsing"))
 
+_METRIC_TEST = r'''
+import json, math, re, sys
+try:
+    data = json.load(sys.stdin)
+    matches, warnings = [], []
+    for index, rule in enumerate(data["metrics"]):
+        pattern = re.compile(rule["pattern"])
+        step_group = rule.get("step", "step")
+        values = rule["values"]
+        if not isinstance(values, dict) or not values or step_group not in pattern.groupindex or any(g not in pattern.groupindex for g in values.values()):
+            raise ValueError("step 和指标需要引用已定义的命名分组。")
+        found = False
+        for line in data["sample"].splitlines():
+            match = pattern.search(line)
+            if not match:
+                continue
+            found = True
+            step = int(match.group(step_group))
+            numbers = {key:float(match.group(group)) for key, group in values.items()}
+            if not math.isfinite(step) or any(not math.isfinite(v) for v in numbers.values()):
+                raise ValueError("指标与 step 必须是有限数值。")
+            matches.append({"rule":index,"step":step,"values":numbers})
+            if len(matches) >= 200:
+                break
+        if not found:
+            warnings.append("规则 %d 没有匹配到示例日志。" % (index+1))
+        if len(matches) >= 200:
+            warnings.append("仅显示前 200 条匹配。")
+            break
+    print(json.dumps({"matches":matches,"warnings":warnings},ensure_ascii=True))
+except Exception as error:
+    print(json.dumps({"error":"指标规则无效："+str(error)[:500]},ensure_ascii=True))
+'''
+
 
 def is_loopback(peer):
     """Use the actual socket peer, never an untrusted forwarded-for header."""
@@ -181,9 +215,36 @@ class ProjectImports:
     def listing(self):
         with self.lock:
             states = [common.read_json(path) for path in self.root.glob("*/state.json")]
+            with self.hub.lock:
+                deleted = {row[0] for row in self.hub.db.execute("SELECT digest FROM projects WHERE deleted_at IS NOT NULL")}
             return {"available": True, "picker_available": os.name == "nt", "imports":
-                    [self._public(state) for state in sorted((s for s in states if isinstance(s, dict)),
+                    [self._public(state) for state in sorted((s for s in states if isinstance(s, dict)
+                        and s.get("project", {}).get("digest") not in deleted),
                                                              key=lambda s: s.get("updated", 0), reverse=True)[:100]]}
+
+    def test_metrics(self, payload):
+        """Test actual Python expressions without letting a bad regex hang the Hub."""
+        import subprocess
+        import sys
+        metrics, sample = payload.get("metrics"), payload.get("sample_log")
+        if not isinstance(metrics, list) or not 1 <= len(metrics) <= 30:
+            raise ValueError("请提供 1–30 条指标规则。")
+        if not isinstance(sample, str) or not sample.strip() or len(sample) > 16000:
+            raise ValueError("请提供不超过 16,000 字符的示例日志。")
+        if len(json.dumps(metrics)) > 32000:
+            raise ValueError("指标规则过大。")
+        try:
+            result = subprocess.run([sys.executable, "-I", "-c", _METRIC_TEST],
+                input=json.dumps({"metrics": metrics, "sample": sample}), text=True, encoding="utf-8",
+                capture_output=True, timeout=2, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            raise ValueError("规则匹配超过 2 秒，请简化表达式；配置未修改。") from None
+        if result.returncode:
+            raise ValueError("规则解析失败，请检查表达式、step 和数值分组。")
+        reply = json.loads(result.stdout)
+        if "error" in reply:
+            raise ValueError(reply["error"])
+        return reply
 
     def item(self, identity):
         with self.lock:
@@ -340,6 +401,9 @@ class ProjectImports:
                         self._set(identity, uploaded_bytes=offset)
                 self._set(identity, status="published", phase="Available in the algorithm library; select workers to deploy",
                           project=uploaded["project"], error=None)
+                # Deletion can race the brief interval between publishing the
+                # library row and saving this import's final state.
+                self.hub._cleanup_project_archives([uploaded["project"]["digest"]])
             self._set(identity, status="building", phase="Packaging an immutable snapshot; original source remains unchanged", error=None)
             self._launch(identity, build)
             return self.item(identity)

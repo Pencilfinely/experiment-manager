@@ -1,6 +1,7 @@
 """Conservative, explainable admission; no claim of GPU memory isolation."""
 from __future__ import annotations
 
+import copy
 import math
 from .common import now
 
@@ -42,6 +43,10 @@ def eligible(task, snapshot):
     if not set(task.get("assets", [])).issubset(snapshot.get("assets", [])):
         return False
     resources = task["resources"]
+    gpu_uuids = task.get("scheduling", {}).get("gpu_uuids", [])
+    # Older workers ignore GPU constraints; never assign constrained work to them.
+    if gpu_uuids and "scheduler-v2" not in snapshot.get("capabilities", []):
+        return False
     policy = snapshot.get("policy", {})
     if resources["cpu"] > policy.get("cpu_budget", 4) or resources["ram_mb"] > policy.get("ram_budget_mb", 8192):
         return False
@@ -52,6 +57,7 @@ def eligible(task, snapshot):
     profiles = snapshot.get("profiles", {})
     matching = {x["profile"] for x in task["environments"] if profiles.get(x["profile"]) == x["image"]}
     return any(_valid_number(gpu.get("total_mb")) and
+               (not gpu_uuids or gpu.get("uuid") in gpu_uuids) and
                gpu["total_mb"] - gpu.get("reserve_mb", 2048) >= resources["gpu_memory_mb"] and
                gpu.get("max_jobs", 1) > 0 and matching.intersection(gpu.get("profiles", []))
                for gpu in snapshot.get("gpus", []))
@@ -81,6 +87,9 @@ def select_device(task, snapshot, active):
     profiles = snapshot.get("profiles", {})
     candidates = []
     for gpu in snapshot.get("gpus", []):
+        gpu_uuids = task.get("scheduling", {}).get("gpu_uuids", [])
+        if gpu_uuids and gpu.get("uuid") not in gpu_uuids:
+            continue
         if not _valid_number(gpu.get("free_mb")) or gpu["free_mb"] < 0:
             continue
         colocated = [item for item in active if item.get("gpu_uuid") == gpu["uuid"]]
@@ -104,19 +113,69 @@ def select_device(task, snapshot, active):
     return {"gpu_uuid": gpu_uuid, "environment": environment}
 
 
-def choose_node(task, nodes, counts):
+def _matching_template(task, snapshot):
+    return next((template for template in snapshot.get("task_templates", [])
+                 if template.get("project_bundle_id") == task.get("project_bundle_id")
+                 and template.get("experiment_id") == task.get("experiment_id")), None)
+
+
+def _bind_project(task, snapshot, original):
+    """Rebind deployment paths and environments without changing experiment inputs."""
+    if not task.get("project_bundle_id"):
+        return task
+    template = _matching_template(task, snapshot)
+    if template is None:
+        return None
+    bound = copy.deepcopy(task)
+    bound["source"] = copy.deepcopy(template["source"])
+    bound["environments"] = copy.deepcopy(template["environments"])
+    deployed_tags = task.get("deployment_tags", original.get("tags", []) if original else [])
+    extra_tags = [tag for tag in task.get("tags", []) if tag not in deployed_tags and not tag.startswith("hnode-")]
+    bound["tags"] = list(dict.fromkeys(template.get("tags", []) + extra_tags))
+    bound["deployment_tags"] = list(template.get("tags", []))
+    aliases = template.get("asset_aliases", {})
+    bound["assets"] = list(dict.fromkeys(aliases.get(asset, asset) for asset in task.get("assets", [])))
+    if aliases:
+        bound["asset_aliases"] = copy.deepcopy(aliases)
+    return bound
+
+
+def choose_assignment(task, nodes, counts):
+    """Return an eligible node and the exact node-local spec to persist atomically."""
     candidates = []
     timestamp = now()
+    original = None
+    if task.get("project_bundle_id"):
+        for node in nodes:
+            template = _matching_template(task, node.get("snapshot", {}))
+            if template and template.get("source") == task.get("source"):
+                original = template
+                break
+    scheduling = task.get("scheduling", {})
+    allowed = scheduling.get("node_ids", [])
+    preferred = scheduling.get("preferred_node_ids", [])
     for node in nodes:
+        if allowed and node["id"] not in allowed:
+            continue
         snapshot = node.get("snapshot", {})
         if timestamp - node.get("last_seen", 0) > 45 or node.get("mode", "run") != "run":
             continue
-        if not eligible(task, snapshot):
+        bound = _bind_project(task, snapshot, original)
+        if bound is None or not eligible(bound, snapshot):
             continue
         policy = snapshot.get("policy", {})
         count = counts.get(node["id"], 0)
         if count >= policy.get("max_prefetch", 4):
             continue
         speed = max(0.1, float(policy.get("speed", 1)))
-        candidates.append(((count + 1) / speed, node["id"]))
-    return min(candidates)[1] if candidates else None
+        rank = preferred.index(node["id"]) if node["id"] in preferred else len(preferred)
+        candidates.append((rank, (count + 1) / speed, node["id"], bound))
+    if not candidates:
+        return None
+    _, _, node_id, spec = min(candidates, key=lambda value: value[:3])
+    return {"node_id": node_id, "spec": spec}
+
+
+def choose_node(task, nodes, counts):
+    assignment = choose_assignment(task, nodes, counts)
+    return assignment["node_id"] if assignment else None
