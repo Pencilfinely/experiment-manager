@@ -841,10 +841,11 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
         if not start_now:
             # Installing software while stopped is a completed operation, even
             # if the previous process failed. Retain its version as run history
-            # while clearing stale lifecycle flags; no supervisor is started.
+            # while clearing stale failures. Keep delayed supervisors canceled
+            # until an explicit start() clears the startup guard.
             _write_status(root, status='stopped', detail='Worker software installed; not started / 算力端软件已安装，代理保持停止',
                           node_id=settings['node_id'], pid=None, process_identity=None,
-                          online=False, stop_requested=False, shutdown=None)
+                          online=False, stop_requested=True, shutdown=None)
     return start(root) if start_now else status(root)
 
 

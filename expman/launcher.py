@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -14,30 +15,36 @@ from .hub import Hub, make_server
 
 
 class InstanceLock:
-    def __init__(self, path):
+    def __init__(self, path, *, timeout=0):
         self.path = Path(path)
+        self.timeout = max(0, float(timeout))
         self.stream = None
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.path.open('a+b')
-        try:
-            self.stream.seek(0)
-            if not self.stream.read(1):
-                self.stream.write(b'0')
-                self.stream.flush()
-            self.stream.seek(0)
-            if os.name == 'nt':
-                import msvcrt
-                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.stream.close()
-            self.stream = None
-            raise RuntimeError('This data directory is already in use / 此数据目录已有程序运行')
-        return self
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                self.stream.seek(0)
+                if not self.stream.read(1):
+                    self.stream.write(b'0')
+                    self.stream.flush()
+                self.stream.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.stream.close()
+                    self.stream = None
+                    raise RuntimeError('This data directory is already in use / 此数据目录已有程序运行')
+                time.sleep(min(0.01, remaining))
 
     def __exit__(self, *args):
         if self.stream:

@@ -299,7 +299,9 @@ def controller_stop_for_update(root):
 def controller_serve(root, port, host):
     from .hub import Hub, make_server
     root = Path(root).expanduser().resolve()
-    with InstanceLock(root / 'controller.lock'):
+    # Status probes briefly take this same exclusive lock. Give a probe time
+    # to release it, while still refusing another persistent controller owner.
+    with InstanceLock(root / 'controller.lock', timeout=0.2):
         hub = Hub(root)
         server = None
         nonce = uuid.uuid4().hex

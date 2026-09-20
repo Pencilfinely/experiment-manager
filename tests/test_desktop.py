@@ -136,6 +136,39 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(desktop.controller_update_status(self.root)["ready_for_update"])
         self.assertFalse(desktop.controller_status(self.root)["running"])
 
+    def test_controller_start_waits_for_transient_status_probe_lock(self):
+        acquired, release, retried = threading.Event(), threading.Event(), threading.Event()
+        def probe():
+            # Model the exact exclusive lock briefly held by _lock_is_held.
+            with desktop.InstanceLock(self.root / 'controller.lock'):
+                acquired.set()
+                release.wait(3)
+        thread = threading.Thread(target=probe, daemon=True)
+        thread.start()
+        self.assertTrue(acquired.wait(2))
+        original_sleep = time.sleep
+        def after_contention(delay):
+            if threading.current_thread() is self.thread:
+                retried.set()
+                release.set()
+            original_sleep(delay)
+        try:
+            with patch('expman.launcher.time.sleep', side_effect=after_contention):
+                result = self.serve()
+            self.assertTrue(retried.is_set())
+            self.assertTrue(result['responsive'])
+            self.assertEqual(self.errors, [])
+        finally:
+            release.set()
+            thread.join(3)
+
+    def test_controller_start_still_refuses_persistent_lifecycle_owner(self):
+        with desktop.InstanceLock(self.root / 'controller.lock'):
+            with self.assertRaisesRegex(RuntimeError, 'already in use'):
+                desktop.controller_serve(self.root, 0, '127.0.0.1')
+            self.assertTrue(desktop._lock_is_held(self.root / 'controller.lock'))
+        self.assertFalse((self.root / 'hub.sqlite3').exists())
+
     def test_shutdown_remains_running_until_controller_lock_is_released(self):
         common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
         common.atomic_json(self.root / "desktop-process.json", {"nonce": "stopping-owner"})

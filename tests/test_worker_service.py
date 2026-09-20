@@ -199,10 +199,35 @@ class WorkerServiceTests(unittest.TestCase):
                     self.assertFalse(result['online'])
                     self.assertIsNone(result['pid'])
                     self.assertIsNone(result['shutdown'])
+                    self.assertTrue(common.read_json(self.root / 'status.json')['stop_requested'])
                     self.assertEqual(result['installed_version'], service.__version__)
                     self.assertEqual(result['last_run_version'], '0.3.0rc5')
                     self.assertNotIn('version', result)
             spawn.assert_not_called()
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_no_start_install_keeps_delayed_old_supervisor_canceled_until_explicit_start(self):
+        self.select()
+        # start() spawned a child but stop() canceled it before it entered serve().
+        service._write_status(self.root, status='stopped', stop_requested=True,
+                              pid=None, process_identity=None, version='0.3.0rc5')
+        before = self.config_path.read_bytes()
+        with patch.object(service, '_require_linux'), patch.object(service.Path, 'home', return_value=self.home), \
+             patch.object(service, '_spawn_supervisor') as spawn, \
+             patch.object(service, 'private_connection') as connection, \
+             patch.object(service, '_run_agent') as run_agent:
+            result = service.install(self.root, backend='detached', start_now=False)
+            self.assertFalse(result['running'])
+            self.assertEqual(result['status'], 'stopped')
+            self.assertEqual(service.serve(self.root), 0)  # The delayed old child resumes.
+            spawn.assert_not_called()
+            connection.assert_not_called()
+            run_agent.assert_not_called()
+            service.start(self.root)
+            self.assertFalse(common.read_json(self.root / 'status.json')['stop_requested'])
+            spawn.assert_called_once()
+            self.assertEqual(service.serve(self.root), 0)
+            run_agent.assert_called_once()
         self.assertEqual(self.config_path.read_bytes(), before)
 
     def test_live_owner_version_is_never_replaced_by_installed_or_historical_version(self):
