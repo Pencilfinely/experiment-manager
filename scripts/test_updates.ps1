@@ -274,18 +274,131 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Threading;
 using System.Threading.Tasks;
 using ExperimentManagerDesktop;
 static class InstallProbeTests {
+    static int assertions;
+    static void Assert(bool condition,string message) {assertions++;if(!condition)throw new Exception(message);}
+    static void Reject(Action action,string message) {
+        assertions++;try{action();}catch(InvalidOperationException){return;}catch(ArgumentException){return;}catch(NullReferenceException){return;}
+        throw new Exception(message);
+    }
+    static Dictionary<string,object> Stopped() {
+        return new Dictionary<string,object>{{"running",false},{"ready_for_install",true},{"status","stopped"},
+            {"config","/home/user/worker data/node \u7b97\u529b.json"},{"node_id","existing-node"},{"backend","detached"},
+            {"service_root","/home/user/service state"},{"installed_version","0.3.0rc5"}};
+    }
+    static Dictionary<string,object> Installed(Dictionary<string,object> stopped,string version="0.4.0") {
+        var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
+    }
+    static void WorkerCompletion() {
+        string package="/mnt/c/Package with spaces/\u7b97\u529b";
+        foreach(string backend in new[]{"detached","systemd"}) {
+            var stopped=Stopped();stopped["backend"]=backend;int calls=0;string[] observed=null;
+            InstallerForm.CompleteWorkerInstallation(package,"0.4.0",stopped,argv=>{calls++;observed=argv;return Installed(stopped);});
+            Assert(calls==1,"Stopped paired worker did not install its new backend exactly once.");
+            string[] expected={package+"/Client-Worker.sh","install","--no-start","--backend",backend,
+                "--config",(string)stopped["config"],"--service-root",(string)stopped["service_root"]};
+            Assert(observed.Length==expected.Length,"Unexpected worker installation options.");
+            for(int i=0;i<expected.Length;i++)Assert(observed[i]==expected[i],"Installer changed argv or split a configuration path: "+i);
+            Assert((string)stopped["installed_version"]=="0.3.0rc5"&&!(bool)stopped["running"],"Installer mutated the stopped-state evidence.");
+        }
+        var defaults=Stopped();defaults.Remove("backend");defaults.Remove("service_root");
+        InstallerForm.CompleteWorkerInstallation(package,"0.4.0",defaults,argv=>{
+            Assert(argv.Length==7&&argv[4]=="detached","Legacy worker did not default to detached or omitted service root was invented.");return Installed(defaults);
+        });
+        var pep=Stopped();
+        InstallerForm.CompleteWorkerInstallation(package,"0.4.1-rc.2",pep,argv=>Installed(pep,"0.4.1rc2"));assertions++;
+        foreach(bool absent in new[]{true,false}) {
+            var unpaired=Stopped();if(absent)unpaired.Remove("config");else unpaired["config"]="";int calls=0;
+            InstallerForm.CompleteWorkerInstallation(package,"0.4.0",unpaired,argv=>{calls++;throw new Exception("Unpaired worker invoked its installer.");});
+            Assert(calls==0,"First-time unpaired installation started worker setup.");
+        }
+        foreach(var unsafeState in new[] {
+            new Dictionary<string,object>(),
+            new Dictionary<string,object>{{"running",true},{"ready_for_install",true}},
+            new Dictionary<string,object>{{"running",false},{"ready_for_install",false}},
+            new Dictionary<string,object>{{"running","false"},{"ready_for_install",true}},
+            new Dictionary<string,object>{{"running",false},{"ready_for_install","true"}}
+        }) {
+            int calls=0;Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",unsafeState,argv=>{calls++;return Installed(Stopped());}),
+                "Unverified worker state allowed installation.");Assert(calls==0,"Unsafe worker invoked the install command.");
+        }
+        var unknownBackend=Stopped();unknownBackend["backend"]="unknown";int unknownCalls=0;
+        Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",unknownBackend,argv=>{unknownCalls++;return Installed(unknownBackend);}),
+            "Unknown original service backend was replaced.");Assert(unknownCalls==0,"Unknown service backend invoked an installer.");
+        foreach(string version in new[]{"0.3.0rc5","unknown","","0.4.1"}) {
+            var stopped=Stopped();Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",stopped,argv=>Installed(stopped,version)),
+                "Old, absent, unknown or unexpected backend version was reported as updated.");
+        }
+        foreach(string state in new[]{"failed","error","selection_required","pairing_required","running","unknown",""}) {
+            var stopped=Stopped();var result=Installed(stopped);result["status"]=state;
+            Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",stopped,argv=>result),"Unconfirmed status was reported as an installed stopped worker: "+state);
+        }
+        foreach(object running in new object[]{true,"false",null}) {
+            var stopped=Stopped();var result=Installed(stopped);if(running==null)result.Remove("running");else result["running"]=running;
+            Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",stopped,argv=>result),"Missing, unknown or running process state was accepted.");
+        }
+        foreach(string identity in new[]{"config","node_id"}) {
+            foreach(bool missing in new[]{false,true}) {
+                var stopped=Stopped();var result=Installed(stopped);if(missing)result.Remove(identity);else result[identity]="different";
+                Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",stopped,argv=>result),"Worker installation changed or forgot the existing "+identity);
+            }
+        }
+        var original=Stopped();bool propagated=false;
+        try{InstallerForm.CompleteWorkerInstallation(package,"0.4.0",original,argv=>{throw new IOException("simulated WSL failure");});}
+        catch(IOException){propagated=true;}
+        Assert(propagated,"WSL installation failure was swallowed.");
+        Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",null,argv=>Installed(original)),"Null readiness state was accepted.");
+        Reject(()=>InstallerForm.CompleteWorkerInstallation(package,"0.4.0",original,argv=>null),"Null installation result was reported successful.");
+    }
+    static void InstallerWiring() {
+        var method=typeof(InstallerForm).GetMethod("Install",BindingFlags.NonPublic|BindingFlags.Static);
+        var opcodes=new Dictionary<short,OpCode>();
+        foreach(var field in typeof(OpCodes).GetFields(BindingFlags.Public|BindingFlags.Static)) {
+            var opcode=(OpCode)field.GetValue(null);opcodes[opcode.Value]=opcode;
+        }
+        byte[] code=method.GetMethodBody().GetILAsByteArray();int verify=-1,complete=-1,version=-1,write=-1;
+        for(int offset=0;offset<code.Length;) {
+            int position=offset;short key=code[offset++];if(key==0xfe)key=unchecked((short)(0xfe00|code[offset++]));
+            OpCode opcode=opcodes[key];int size;
+            switch(opcode.OperandType) {
+                case OperandType.InlineNone:size=0;break;
+                case OperandType.ShortInlineBrTarget:case OperandType.ShortInlineI:case OperandType.ShortInlineVar:size=1;break;
+                case OperandType.InlineVar:size=2;break;
+                case OperandType.InlineI8:case OperandType.InlineR:size=8;break;
+                case OperandType.InlineSwitch:size=4+4*BitConverter.ToInt32(code,offset);break;
+                default:size=4;break;
+            }
+            if(opcode.OperandType==OperandType.InlineMethod&&(opcode==OpCodes.Call||opcode==OpCodes.Callvirt)) {
+                var called=method.Module.ResolveMethod(BitConverter.ToInt32(code,offset));
+                if(called.DeclaringType==typeof(InstallerForm)&&called.Name=="VerifyBackendStopped")verify=position;
+                if(called.DeclaringType==typeof(InstallerForm)&&called.Name=="CompleteWorkerInstallation")complete=position;
+                if(called.DeclaringType==typeof(App)&&called.Name=="Write"&&write<0)write=position;
+            }
+            if(opcode==OpCodes.Ldstr&&method.Module.ResolveString(BitConverter.ToInt32(code,offset))=="installed_version")version=position;
+            offset+=size;
+        }
+        Assert(verify>=0&&complete>verify&&version>complete&&write>version,
+            "Real installer must verify stopped state, install the WSL backend, then record installed_version and write settings.");
+    }
     static int Main(string[] args) {
         try {
+            WorkerCompletion();InstallerWiring();
             App.Worker=false;
             string data=Path.Combine(args[0],"legacy data");Directory.CreateDirectory(data);
             string status=Path.Combine(data,"status.json");
             var settings=new Dictionary<string,object>();
             File.WriteAllText(status,"{\"running\":false,\"status\":\"stopped\",\"ready_for_install\":true,\"unverified_nodes\":1}");
-            InstallerForm.VerifyBackendStopped(args[0],data,settings);
+            var stoppedState=InstallerForm.VerifyBackendStopped(args[0],data,settings);
+            Assert(stoppedState!=null&&App.Text(stoppedState,"status")=="stopped"&&stoppedState.ContainsKey("unverified_nodes"),
+                "Install readiness probe stopped returning its original status evidence.");
+            App.Worker=true;
+            Assert(InstallerForm.VerifyBackendStopped(args[0],data,settings)==null,"Fresh unconfigured worker unexpectedly probed WSL.");
+            App.Worker=false;
             foreach(string invalid in new[] {
                 "{\"running\":true,\"status\":\"running\",\"version\":\"0.3.0rc1\",\"ready_for_install\":false}",
                 "{\"running\":true,\"status\":\"unresponsive\",\"ready_for_install\":false}",
@@ -311,7 +424,7 @@ static class InstallProbeTests {
                 File.WriteAllText(release,"exit");
                 child.WaitForExit(5000);
             }
-            Console.WriteLine("PASS installer subprocess boundary: local stopped state, quoted data root, old backend, unresponsive backend, separate install protocol and previous-client handoff identity.");
+            Console.WriteLine("PASS installer: "+assertions+" worker completion/wiring assertions; stopped WSL code install, no restart, preserved identity, version validation, readiness subprocess and previous-client handoff.");
             return 0;
         } catch(Exception ex){Console.Error.WriteLine(ex);return 1;}
     }

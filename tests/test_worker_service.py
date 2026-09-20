@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -140,6 +141,89 @@ class WorkerServiceTests(unittest.TestCase):
         self.assertEqual(len(list((self.home / '.local/share/applications').glob('*.desktop'))), 1)
         self.assertEqual(result['backend'], 'detached')
         self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_no_start_upgrade_changes_installed_version_without_starting_or_repairing_node(self):
+        incoming = self.folder / 'incoming'
+        package = incoming / 'expman'
+        package.mkdir(parents=True)
+        source = package / 'worker_service.py'
+        source.write_text('# old worker release\n', encoding='utf-8')
+        marker = {'role': 'windows-worker-x64', 'version': '0.3.0-rc.5'}
+        common.atomic_json(incoming / 'release-role.json', marker)
+        before = self.config_path.read_bytes()
+        with patch.object(service, '_require_linux'), patch.object(service.Path, 'home', return_value=self.home), \
+             patch.object(service, '__file__', str(source)), \
+             patch.object(service, '_spawn_supervisor') as spawn, \
+             patch('expman.worker_setup.start') as setup:
+            with patch.object(service, '__version__', '0.3.0rc5'):
+                service.install(self.root, config=str(self.config_path), backend='detached', start_now=False)
+            old_settings = common.read_json(self.root / 'service.json')
+            service._write_status(self.root, status='stopped', version='0.3.0rc5', pid=None, process_identity=None)
+            source.write_text('# updated worker release\n', encoding='utf-8')
+            common.atomic_json(incoming / 'release-role.json', {**marker, 'version': '0.4.0'})
+            with patch.object(service, '__version__', '0.4.0'):
+                result = service.install(self.root, backend='detached', start_now=False)
+            spawn.assert_not_called()
+            setup.assert_not_called()
+        updated = common.read_json(self.root / 'service.json')
+        self.assertNotEqual(updated['package_dir'], old_settings['package_dir'])
+        self.assertEqual(updated['version'], '0.4.0')
+        self.assertEqual(updated['config'], old_settings['config'])
+        self.assertEqual(updated['node_id'], old_settings['node_id'])
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual((Path(updated['package_dir']) / 'expman/worker_service.py').read_text(encoding='utf-8'), '# updated worker release\n')
+        self.assertFalse(result['running'])
+        self.assertEqual(result['status'], 'stopped')
+        self.assertEqual(result['installed_version'], '0.4.0')
+        self.assertEqual(result['last_run_version'], '0.3.0rc5')
+        self.assertNotIn('version', result)
+        # Neither inspection nor install --no-start rewrites the last process's report.
+        self.assertEqual(common.read_json(self.root / 'status.json')['version'], '0.3.0rc5')
+
+    def test_no_start_install_clears_previous_failed_lifecycle_but_keeps_run_history(self):
+        self.select()
+        before = self.config_path.read_bytes()
+        with patch.object(service, '_require_linux'), patch.object(service.Path, 'home', return_value=self.home), \
+             patch.object(service, '_spawn_supervisor') as spawn:
+            for old_state in ('failed', 'exit_failed'):
+                with self.subTest(old_state=old_state):
+                    service._write_status(self.root, status=old_state, detail='Previous worker failed',
+                                          pid=None, process_identity=None, version='0.3.0rc5',
+                                          online=True, stop_requested=True, shutdown={'failed': True})
+                    with patch.object(service.sys, 'stdout', new_callable=io.StringIO) as output:
+                        code = service.main(['install', '--service-root', str(self.root), '--backend', 'detached', '--no-start'])
+                    self.assertEqual(code, 0)
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(result['status'], 'stopped')
+                    self.assertFalse(result['running'])
+                    self.assertFalse(result['online'])
+                    self.assertIsNone(result['pid'])
+                    self.assertIsNone(result['shutdown'])
+                    self.assertEqual(result['installed_version'], service.__version__)
+                    self.assertEqual(result['last_run_version'], '0.3.0rc5')
+                    self.assertNotIn('version', result)
+            spawn.assert_not_called()
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_live_owner_version_is_never_replaced_by_installed_or_historical_version(self):
+        settings = self.select()
+        common.atomic_json(self.root / 'service.json', {**settings, 'version': '0.4.0'})
+        service._write_status(self.root, status='online', pid=4217, process_identity='1234', version='0.3.0rc5')
+        with patch.object(service, '_process_identity', return_value='1234'):
+            result = service.status(self.root)
+        self.assertTrue(result['running'])
+        self.assertEqual(result['version'], '0.3.0rc5')
+        self.assertEqual(result['installed_version'], '0.4.0')
+        with patch.object(service, '_process_identity', return_value='different'):
+            stopped = service.status(self.root)
+            with patch.object(service, 'agent_is_running', return_value=True):
+                external = service.status(self.root)
+        self.assertFalse(stopped['running'])
+        self.assertEqual(stopped['last_run_version'], '0.3.0rc5')
+        self.assertNotIn('version', stopped)
+        self.assertTrue(external['running'])
+        self.assertEqual(external['status'], 'external_running')
+        self.assertNotIn('version', external)
 
     def test_running_install_reuses_identical_bits_but_requires_stop_for_new_code_or_role(self):
         incoming = self.folder / 'incoming'

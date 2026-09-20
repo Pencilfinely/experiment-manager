@@ -5,8 +5,8 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.4.0 is available as a regular release.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-This version adds experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. See the [release notes](docs/RELEASE-0.4.0.md). Updates start when you request them.
+**0.4.1 is available as a regular release.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. This patch updates the WSL backend even when a worker is stopped and distinguishes installed from last-running versions. See the [release notes](docs/RELEASE-0.4.1.md). Updates start when you request them.
 
 ## Download and install
 

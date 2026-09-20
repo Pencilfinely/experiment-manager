@@ -52,6 +52,15 @@ public static class DesktopIconTest {
         }
     }
 }
+public static class DesktopWorkerInstallTest {
+    public static void VerifyUnpaired(System.Reflection.MethodInfo method) {
+        var stopped=new System.Collections.Generic.Dictionary<string,object>{{"running",false},{"ready_for_install",true}};
+        Func<string[],System.Collections.Generic.Dictionary<string,object>> unexpected=arguments=> {
+            throw new Exception("Fresh unpaired desktop installation unexpectedly invoked its WSL installer.");
+        };
+        method.Invoke(null,new object[]{"/tmp/unpaired desktop package","0.4.0",stopped,unexpected});
+    }
+}
 '@
 
 function Invoke-AppMethod($Method, [object[]]$Values) {
@@ -75,6 +84,15 @@ try {
         $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($executable))
         $app = $assembly.GetType('ExperimentManagerDesktop.App', $true)
         $flags = [Reflection.BindingFlags]'NonPublic,Static'
+        $installer = $assembly.GetType('ExperimentManagerDesktop.InstallerForm', $true)
+        $completeWorker = $installer.GetMethod('CompleteWorkerInstallation', $flags)
+        $verifyStopped = $installer.GetMethod('VerifyBackendStopped', $flags)
+        if (-not $completeWorker -or -not $verifyStopped -or
+            $verifyStopped.ReturnType -ne [Collections.Generic.Dictionary[string,object]] -or
+            $completeWorker.GetParameters().Count -ne 4) {
+            throw "Worker installation completion/readiness contract is missing from the compiled $role client."
+        }
+        [DesktopWorkerInstallTest]::VerifyUnpaired($completeWorker)
         $app.GetField('Package', $flags).SetValue($null, $testRoot)
         $quote = $app.GetMethod('Quote', $flags)
         $run = $app.GetMethod('Run', $flags)
@@ -173,7 +191,7 @@ try {
         if ($report.icon_sha256 -ine $expectedIconHash -or ($report.runtime_icon_sizes -join ',') -ne '16,20,24,28,32,36,40,44,48,56,64,72,80,88,96,112,128') {
             throw "Embedded icon resource or its frames do not match the expected role: $role"
         }
-        Write-Output "PASS $role : native compilation, role-specific EXE/window/tray icons, WinForms ICO frames, embedded role, bare options, exact Python argv roundtrip."
+        Write-Output "PASS $role : native compilation, role-specific EXE/window/tray icons, WinForms ICO frames, embedded role, bare options, exact Python argv roundtrip, unpaired worker installation remains inactive."
     }
 }
 finally {

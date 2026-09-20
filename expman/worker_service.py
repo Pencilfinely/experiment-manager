@@ -164,13 +164,19 @@ def status(service_root=None):
     state = common.read_json(root / 'status.json', {})
     running = _owned_process(state)
     result = {key: state[key] for key in ('status', 'detail', 'pid', 'node_id', 'updated_at',
-               'online', 'jobs', 'version', 'shutdown') if key in state}
+               'online', 'jobs', 'shutdown') if key in state}
     result.update(running=running, backend=settings.get('backend', 'detached'),
                   node_id=settings.get('node_id'), config=settings.get('config'),
+                  installed_version=settings.get('version'), last_run_version=state.get('version'),
                   service_root=str(root), log_path=str(root / 'worker.log'),
                   session_note=settings.get('session_note',
                     'Background process; auto-start at login is not configured / 后台运行，未配置登录自启'))
     if running:
+        # A deployment can change while stopped without running that version.
+        # Only the verified live owner's own report describes a running backend;
+        # installation metadata and previous-run history remain separate fields.
+        if 'version' in state:
+            result['version'] = state['version']
         # _write_status merges old fields, including after launching older code.
         # Only trust a capability published for this exact process lifetime.
         if state.get('update_stop_process_identity') == state.get('process_identity'):
@@ -832,6 +838,13 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
                 'Windows login/startup is still required after reboot. '
                 '/ 后台进程；Windows 客户端在代理运行时保持 WSL 会话，重启后仍需登录并启动客户端。')
         _save_settings(root, settings)
+        if not start_now:
+            # Installing software while stopped is a completed operation, even
+            # if the previous process failed. Retain its version as run history
+            # while clearing stale lifecycle flags; no supervisor is started.
+            _write_status(root, status='stopped', detail='Worker software installed; not started / 算力端软件已安装，代理保持停止',
+                          node_id=settings['node_id'], pid=None, process_identity=None,
+                          online=False, stop_requested=False, shutdown=None)
     return start(root) if start_now else status(root)
 
 

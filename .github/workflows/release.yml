@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.4.0
+        default: v0.4.1
 permissions:
   contents: write
 env:

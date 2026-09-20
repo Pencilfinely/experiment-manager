@@ -248,7 +248,16 @@ namespace ExperimentManagerDesktop {
                     }
                 }
                 var settings=App.Read(App.SettingsFile);
-                VerifyBackendStopped(destination,dataPath,settings);
+                var stopped=VerifyBackendStopped(destination,dataPath,settings);
+                if(App.Worker&&stopped!=null) {
+                    string distribution=App.Text(settings,"distribution");
+                    string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",destination).Trim();
+                    CompleteWorkerInstallation(package,version,stopped,arguments=> {
+                        var command=new List<string>{"-d",distribution,"--exec","bash"};
+                        command.AddRange(arguments);
+                        return App.Command("wsl.exe",command.ToArray());
+                    });
+                }
                 if(!App.Worker) settings["data_root"]=Path.GetFullPath(dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
@@ -263,17 +272,39 @@ namespace ExperimentManagerDesktop {
                 return destination;
             }
         }
-        internal static void VerifyBackendStopped(string destination,string dataPath,Dictionary<string,object> settings) {
+        internal static Dictionary<string,object> VerifyBackendStopped(string destination,string dataPath,Dictionary<string,object> settings) {
             Dictionary<string,object> state;
             if(App.Worker) {
                 string distribution=App.Text(settings,"distribution");
                 // A fresh worker installation has no selected Linux service yet.
-                if(string.IsNullOrEmpty(distribution))return;
+                if(string.IsNullOrEmpty(distribution))return null;
                 string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",destination).Trim();
                 state=App.Command("wsl.exe","-d",distribution,"--exec","bash",package+"/Client-Worker.sh","install-status");
             } else state=App.Command(Path.Combine(destination,"runtime","python.exe"),"-m","expman.desktop",
                 "controller-install-status","--root",Path.GetFullPath(dataPath));
             DesktopLifecycle.RequireInstallReady(state,App.Worker);
+            return state;
+        }
+        internal static void CompleteWorkerInstallation(string package,string version,Dictionary<string,object> stopped,
+                Func<string[],Dictionary<string,object>> invoke) {
+            DesktopLifecycle.RequireInstallReady(stopped,true);
+            string config=App.Text(stopped,"config");
+            if(string.IsNullOrEmpty(config))return; // First pairing remains an explicit setup action.
+            string backend=App.Text(stopped,"backend","detached");
+            if(backend!="detached"&&backend!="systemd")throw new InvalidOperationException("无法确认原算力后台启动方式，尚未切换代码。");
+            var arguments=new List<string>{package+"/Client-Worker.sh","install","--no-start","--backend",backend,"--config",config};
+            string serviceRoot=App.Text(stopped,"service_root");
+            if(!string.IsNullOrEmpty(serviceRoot)){arguments.Add("--service-root");arguments.Add(serviceRoot);}
+            // Deploy WSL code even when the worker was stopped before the update.
+            // Starting it is a separate choice carried by --resume-service.
+            var result=invoke(arguments.ToArray());
+            if(result==null)throw new InvalidOperationException("算力后台安装未返回有效状态，请重试安装。");
+            object running;
+            string status=App.Text(result,"status");
+            if(!result.TryGetValue("running",out running)||!(running is bool)||(bool)running||status!="stopped"||
+                    !UpdateService.BackendMatchesRelease(App.Text(result,"installed_version"),version)||
+                    App.Text(result,"config")!=config||App.Text(result,"node_id")!=App.Text(stopped,"node_id"))
+                throw new InvalidOperationException("算力后台代码更新尚未确认完成："+App.Text(result,"detail",status)+"。原节点配置与实验数据保留，请重试安装。");
         }
     }
 
@@ -484,7 +515,17 @@ namespace ExperimentManagerDesktop {
             string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state;
             summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
             string backendVersion=App.Text(value,"version");
-            if(!string.IsNullOrEmpty(backendVersion))summary.Text+="\n客户端版本："+App.Version+" · 后台版本："+backendVersion;
+            if(App.Worker) {
+                summary.Text+="\n客户端版本："+App.Version;
+                string installedVersion=App.Text(value,"installed_version");
+                if(App.Flag(value,"running"))summary.Text+=" · 运行中后台版本："+(string.IsNullOrEmpty(backendVersion)?"无法确认":backendVersion);
+                else if(!string.IsNullOrEmpty(installedVersion))summary.Text+=" · 已安装后台版本："+installedVersion+"（当前未运行）";
+                string lastVersion=App.Text(value,"last_run_version");
+                if(!App.Flag(value,"running")&&!string.IsNullOrEmpty(lastVersion))summary.Text+="\n上次运行版本："+lastVersion;
+                if(startingAfterUpdate&&state=="stopped"&&UpdateService.BackendMatchesRelease(installedVersion,App.Version)) {
+                    App.UpdateReport("backend_install","completed",installedVersion+"；后台保持停止");startingAfterUpdate=false;
+                }
+            } else if(!string.IsNullOrEmpty(backendVersion))summary.Text+="\n客户端版本："+App.Version+" · 后台版本："+backendVersion;
             if(startingAfterUpdate&&App.Flag(value,"running")&&(App.Worker||App.Flag(value,"responsive"))&&UpdateService.BackendMatchesRelease(backendVersion,App.Version)) {
                 App.UpdateReport("backend_start","completed",backendVersion);startingAfterUpdate=false;
             }
