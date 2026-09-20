@@ -5,8 +5,8 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**0.4.2 is available as a regular release.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. Controller updates no longer require idle, disconnected workers to come online solely to refresh their status. Includes the stopped-worker backend update and version reporting fixes. See the [release notes](docs/RELEASE-0.4.2.md). Updates start when you request them.
+**Current version: 0.4.3.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. New projects allow GPU sharing by default. Edit existing node concurrency and budgets from the compute page, and override resources for individual experiments or matrices. See the [release notes](docs/RELEASE-0.4.3.md). Updates start when you request them.
 
 ## Download and install
 
@@ -86,13 +86,17 @@ Native Ubuntu prefers user-level systemd when available and otherwise uses a det
 
 | Mode | Current support |
 |---|---|
-| One experiment on one GPU | Supported; setup defaults to conservative concurrency |
+| One experiment on one GPU | Supported; an experiment can request exclusive use within this manager |
 | Separate experiments on separate GPUs | Supported when node concurrency and resource budgets allow |
 | Several independent experiments on one GPU | Supported when tasks allow sharing, the GPU job limit allows it and budgets fit |
 | One experiment across multiple GPUs or machines | Not implemented; requires algorithm and scheduler support |
 | Automatically measure and choose the fastest allocation | Not implemented |
 
-Free VRAM is not proof of free compute. The manager does not silently change batch size, precision or learning rate to make a task fit.
+All GPUs in a shared machine may participate; another person's program using a GPU does not itself prevent admission. Each start checks current free VRAM/RAM, headroom, existing experiment reservations, CPU/RAM budgets, disk space and concurrency limits. Sharing may affect speed and does not impose a hard GPU memory limit. The manager does not silently change batch size, precision or learning rate to make a task fit.
+
+Use **Compute → Resource settings** to edit node and GPU concurrency, CPU/RAM budgets and VRAM headroom. Updated workers receive saved changes after reconnecting, and the UI distinguishes pending from applied settings. Older workers need an upgrade. Lower limits affect future starts without stopping existing experiments. Fresh installations allow up to four experiments per enabled GPU and four times the enabled GPU count per node; conservative CPU/RAM defaults still apply and can be changed in the form. Upgrades preserve existing GPU choices and budgets.
+
+Single experiments and matrices have their own resource and sharing controls. Exclusive use only excludes other experiments managed by this software from the same GPU; it does not lock out external programs. Since current telemetry cannot attribute memory to each managed process, admission also conservatively reserves existing experiments' declared budgets; the free VRAM shown by system tools alone does not guarantee immediate admission.
 Workers can continue already assigned, cached tasks during a temporary controller outage and return records after reconnecting. An offline task is not silently duplicated onto another machine.
 
 ## Existing deployments and everyday use

@@ -67,3 +67,14 @@
 @media(max-width:950px){.detail-columns{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){.sidebar-toggle{display:none}.scheduling-fields{padding:16px}.scheduling-fields .node-choices,.parameter-definition-grid{grid-template-columns:minmax(0,1fr)}.matrix-list{grid-template-columns:minmax(0,1fr)}.dataset-parameter-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.dataset-parameter-row>button{grid-column:1/-1;justify-self:end}.editor-row{padding:14px}#chart{height:250px}}
 @media(prefers-reduced-motion:reduce){#sidebar-toggle-icon{transition:none}}
+
+/* Resource editors stay outside live node cards so polling never replaces a draft. */
+.task-resource-fields{border:1px solid #dfe8e2;border-radius:12px;background:#fbfcfb;padding:20px;margin:22px 0}
+.task-resource-fields>h3{margin:0 0 10px}.task-resource-fields>p{line-height:1.8;font-size:12px}
+.task-resource-fields>label>select{display:block;width:100%;margin-top:8px}
+.resource-budget-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.resource-editor{scroll-margin-top:20px}
+.resource-editor .resource-sync{padding:12px 15px;background:#eef4f0;border-radius:8px;line-height:1.75;color:#527063;font-size:12px}
+.resource-gpu{padding:18px 20px;border:1px solid var(--line);border-radius:10px;margin:14px 0;background:#fafcfb}
+.resource-gpu h4{margin:0;font-size:14px}.resource-uuid{font:11px/1.6 Consolas,monospace;overflow-wrap:anywhere;color:var(--muted)}
+#nodes>.node>button{margin:6px 8px 0 0}
+@media(max-width:760px){.resource-budget-grid{grid-template-columns:minmax(0,1fr)}.task-resource-fields,.resource-gpu{padding:16px}}

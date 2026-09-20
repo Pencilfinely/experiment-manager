@@ -392,14 +392,18 @@ class WorkerSetup:
             raise ValueError('At least 2 GiB available system RAM is required')
         config.update(allowed_repos=[str(self.repo)], tags=[self.pairing['node_id']],
             profiles={profile: {'image': image, 'verified': True, 'gpu_name_patterns': sorted({g['name'] for g in selected})}},
-            gpu_policy={g['uuid']: {'max_jobs': 1 if g in selected else 0, 'reserve_mb': 1024} for g in self.gpus})
-        config['policy'].update(max_running=1, max_prefetch=2, cpu_budget=min(4, os.cpu_count() or 1),
+            gpu_policy={g['uuid']: {'max_jobs': 4 if g in selected else 0, 'reserve_mb': 1024} for g in self.gpus})
+        # Concurrency is an upper bound, not a reservation. Each start still
+        # checks current free VRAM/RAM and the node's CPU/RAM budgets.
+        concurrency = min(256, 4 * len(selected))
+        config['policy'].update(max_running=concurrency, max_prefetch=2 * concurrency,
+                                cpu_budget=min(4, os.cpu_count() or 1),
                                 ram_budget_mb=min(8192, int(available_ram * 0.75)))
         task = validate_task({'name': 'GPU-check-' + self.pairing['node_id'], 'algorithm': 'CUDA-check',
             'group': 'installation-check', 'backend': 'docker', 'metric_protocol': 'cuda-check-v1',
             'source': {'repo': str(self.repo), 'commit': self.commit}, 'tags': config['tags'],
             'command': ['python', '-m', 'expman.gpu_check'], 'environments': [{'profile': profile, 'image': image}],
-            'params': {}, 'resources': {'gpu_memory_mb': 1024, 'ram_mb': 1536, 'cpu': 1, 'exclusive': True}})
+            'params': {}, 'resources': {'gpu_memory_mb': 1024, 'ram_mb': 1536, 'cpu': 1, 'exclusive': False}})
         config['task_templates'] = [task]
         private_write(self.root / 'gpu-check.task.json', task)
         # Preserve user-added projects/assets and their profiles during a recheck.

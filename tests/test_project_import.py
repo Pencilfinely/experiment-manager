@@ -119,6 +119,29 @@ class ProjectImportTests(unittest.TestCase):
         self.assertIn("Source selection is empty", failed["error"])
         self.assertEqual(failed["draft"]["project"]["include"], state["draft"]["project"]["include"])
 
+    def test_listing_keeps_unpublished_and_saved_drafts_and_hides_deleted_projects(self):
+        published = self.scan()
+        self.imports.publish({"id": published["id"], "reviewed": True})
+        published = self.wait(published["id"])
+        self.assertEqual(published["status"], "published", published.get("error"))
+        self.hub.project_delete({"digest": published["project"]["digest"]})
+
+        saved = self.scan()
+        self.imports.save({"id": saved["id"], **saved["draft"]})
+        saved = self.wait(saved["id"])
+        self.assertEqual(saved["status"], "ready", saved.get("error"))
+        self.assertIsNone(saved["project"])
+        unpublished = self.scan()
+        self.assertNotIn("project", unpublished)
+
+        self.server = make_server(self.hub, port=0)
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        status, result = self.request(self.hub.config["admin_token"])
+        self.assertEqual(status, 200, result)
+        self.assertEqual({item["id"] for item in result["imports"]},
+                         {saved["id"], unpublished["id"]})
+
     def test_scanning_does_not_hold_hub_lock_or_block_other_requests(self):
         entered, release = threading.Event(), threading.Event()
         from expman.project_import import prepare_project

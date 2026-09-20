@@ -49,7 +49,7 @@ def register(root, name, repository, command, data=None):
     task = validate_task({'name': name, 'algorithm': 'custom', 'backend': 'docker', 'group': name,
         'source': {'repo': str(repo), 'commit': commit}, 'command': command,
         'environments': [{'profile': key, 'image': profile['image']}], 'tags': config['tags'],
-        'assets': assets, 'params': {}, 'resources': {'gpu_memory_mb': 2048, 'ram_mb': 2048, 'cpu': 1, 'exclusive': True}})
+        'assets': assets, 'params': {}, 'resources': {'gpu_memory_mb': 2048, 'ram_mb': 2048, 'cpu': 1, 'exclusive': False}})
     if str(repo) not in config['allowed_repos']:
         config['allowed_repos'].append(str(repo))
     templates = config.get('task_templates', [])

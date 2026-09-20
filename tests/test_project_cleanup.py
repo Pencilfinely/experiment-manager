@@ -118,6 +118,49 @@ class ProjectDeletionTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(self.hub.state()['project_deletions'][0]['cleanup_error'], '')
 
+    def test_delete_with_unpublished_draft_cleans_only_matching_import_archives(self):
+        self.upload()
+        imports = self.hub.root / 'imports'
+        common.atomic_json(imports / ('1' * 32) / 'state.json', {'project': None})
+        published = imports / ('2' * 32)
+        common.atomic_json(published / 'state.json', {'project': {'digest': self.digest}})
+        archive = published / 'bundle-published.zip'
+        archive.write_bytes(self.body)
+        draft = published / 'project.json'
+        draft.write_text('{}')
+        other = imports / ('3' * 32)
+        common.atomic_json(other / 'state.json', {'project': {'digest': 'c' * 64}})
+        other_archive = other / 'bundle-other.zip'
+        other_archive.write_bytes(b'keep')
+
+        response = common.api_request(self.url + '/api/projects/delete', self.hub.config['admin_token'],
+                                      {'digest': self.digest})
+
+        self.assertTrue(response['deleted'])
+        self.assertFalse(response['cleanup_pending'])
+        self.assertEqual(response['controller_cleanup_error'], '')
+        self.assertFalse(archive.exists())
+        self.assertTrue(draft.exists())
+        self.assertEqual(other_archive.read_bytes(), b'keep')
+        self.assertEqual(common.read_json(imports / ('1' * 32) / 'state.json'), {'project': None})
+        replay = self.hub.project_delete({'digest': self.digest})
+        self.assertFalse(replay['cleanup_pending'])
+
+    def test_restart_finishes_deletion_when_an_unpublished_draft_exists(self):
+        self.upload()
+        archive = self.hub.root / 'projects' / (self.digest + '.zip')
+        # Reproduce deletion intent committed before interrupted local cleanup.
+        self.hub.db.execute('UPDATE projects SET deleted_at=? WHERE digest=?', (common.now(), self.digest))
+        common.atomic_json(self.hub.root / 'imports' / ('1' * 32) / 'state.json', {'project': None})
+        root = self.hub.root
+        self.hub.close()
+
+        self.hub = Hub(root)
+
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.hub.state()['projects'], [])
+        self.assertEqual(self.hub.state()['project_deletions'][0]['cleanup_error'], '')
+
     def test_worker_delete_before_download_survives_restart_and_lost_ack(self):
         self.upload()
         self.deploy()

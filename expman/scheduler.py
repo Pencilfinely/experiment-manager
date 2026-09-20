@@ -81,7 +81,9 @@ def select_device(task, snapshot, active):
     free_ram, disk = snapshot.get("free_ram_mb"), snapshot.get("disk_free_mb")
     if not _valid_number(free_ram) or not _valid_number(disk):
         return None
-    # Unknown per-process attribution: reserve growth headroom conservatively.
+    # Free memory includes external processes. Without per-task attribution the
+    # current usage of our active tasks may be zero, so reserve their full RAM
+    # budgets for growth even if this also counts some already allocated memory.
     if free_ram - used_ram < resources["ram_mb"] or disk < policy.get("min_disk_free_mb", 1024):
         return None
     profiles = snapshot.get("profiles", {})
@@ -98,6 +100,8 @@ def select_device(task, snapshot, active):
         if colocated and (resources["exclusive"] or any(i["spec"]["resources"]["exclusive"] for i in colocated)):
             continue
         reserved = sum(item["spec"]["resources"]["gpu_memory_mb"] for item in colocated)
+        # Total-used VRAM cannot offset this reservation: it may all belong to
+        # external workloads. Only measured free VRAM is available for sharing.
         available = gpu["free_mb"] - gpu.get("reserve_mb", 2048) - reserved
         if available < resources["gpu_memory_mb"]:
             continue

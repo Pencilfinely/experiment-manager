@@ -136,12 +136,30 @@ class WorkerSetupTests(unittest.TestCase):
             root = Path(path)
             _, config_path = self.configured(root)
             config = read_json(config_path)
-            self.assertEqual(config['policy']['max_running'], 1)
+            self.assertEqual(config['policy']['max_running'], 4)
+            self.assertEqual(config['policy']['max_prefetch'], 8)
             self.assertEqual(config['policy']['ram_budget_mb'], 7500)
-            self.assertEqual(config['gpu_policy'][GPU['uuid']]['max_jobs'], 1)
+            self.assertEqual(config['gpu_policy'][GPU['uuid']]['max_jobs'], 4)
+            self.assertFalse(config['task_templates'][0]['resources']['exclusive'])
             self.assertEqual(config['task_templates'][0]['source']['repo'], str(root / 'repo'))
             self.assertEqual(config['task_templates'][0]['environments'][0]['image'], IMAGE)
             self.assertNotIn(PAIR['token'], json.dumps(config['task_templates']))
+
+    def test_shared_defaults_enable_selected_cards_without_enabling_excluded_gpu(self):
+        with temporary_directory() as path:
+            root = Path(path)
+            setup, _ = self.configured(root)
+            second = dict(GPU, uuid='GPU-22222222-2222-2222-2222-222222222222')
+            excluded = dict(GPU, uuid='GPU-33333333-3333-3333-3333-333333333333')
+            setup.gpus = [GPU, second, excluded]
+            with patch('expman.agent._free_ram_mb', return_value=32768), patch('os.cpu_count', return_value=16):
+                configured = read_json(setup.configure(IMAGE, [GPU, second]))
+            self.assertEqual(configured['policy']['max_running'], 8)
+            self.assertEqual(configured['policy']['max_prefetch'], 16)
+            self.assertEqual(configured['policy']['cpu_budget'], 4)
+            self.assertEqual(configured['policy']['ram_budget_mb'], 8192)
+            self.assertEqual(configured['gpu_policy'][second['uuid']], {'max_jobs': 4, 'reserve_mb': 1024})
+            self.assertEqual(configured['gpu_policy'][excluded['uuid']]['max_jobs'], 0)
 
     def test_software_upgrade_reuses_enrollment_and_keeps_gpu_and_resource_preferences(self):
         with temporary_directory() as path:

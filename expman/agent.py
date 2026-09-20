@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.parse
 
-from . import common, scheduler
+from . import common, scheduler, node_policy
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
@@ -98,7 +98,7 @@ def _pid_alive(pid):
         return True
 
 
-def _free_ram_mb():
+def _ram_mb(total=False):
     if os.name == "nt":
         class MemoryStatus(ctypes.Structure):
             _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
@@ -107,15 +107,23 @@ def _free_ram_mb():
         status = MemoryStatus()
         status.length = ctypes.sizeof(status)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return status.available // (1024 * 1024)
+            return (status.total if total else status.available) // (1024 * 1024)
         return None
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemAvailable:"):
+            if line.startswith("MemTotal:" if total else "MemAvailable:"):
                 return int(line.split()[1]) // 1024
     except (OSError, ValueError):
         pass
     return None
+
+
+def _free_ram_mb():
+    return _ram_mb()
+
+
+def _total_ram_mb():
+    return _ram_mb(total=True)
 
 
 class Agent:
@@ -185,6 +193,15 @@ class Agent:
         self.prep_mutex = threading.Lock()
         self.log_checked = {}
         self.mode = self._meta("hub_mode", "run")
+        self.resource_policy = None
+        self.resource_policy_error = ""
+        saved_policy = self._meta("resource_policy", {})
+        if (isinstance(saved_policy, dict) and saved_policy.get("node_id") == self.config["node_id"]
+                and saved_policy.get("hub_url") == self.config["hub_url"].rstrip("/")):
+            try:
+                self.resource_policy = node_policy.validate(saved_policy.get("value"))
+            except (ValueError, TypeError, OverflowError) as error:
+                self.resource_policy_error = str(error)[:1000]
         from .project_delivery import ProjectDelivery
         self.project_delivery = ProjectDelivery(self)
         for folder in ("runs", "repos", "worktrees", "upload_cache"):
@@ -317,7 +334,17 @@ class Agent:
                   "disk_free_mb": shutil.disk_usage(self.root).free // (1024 * 1024),
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
                   "platform": sys.platform, "docker_available": False}
-        result["capabilities"] = ["scheduler-v2", "project-delete-v1"] + (["project-bundle-v1"] if sys.platform == "linux" else [])
+        result["capabilities"] = ["scheduler-v2", "project-delete-v1", node_policy.CAPABILITY] + (["project-bundle-v1"] if sys.platform == "linux" else [])
+        cpus = os.cpu_count()
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                cpus = min(cpus, len(os.sched_getaffinity(0))) if cpus else len(os.sched_getaffinity(0))
+            except OSError:
+                pass
+        result["resource_policy_limits"] = {"cpu_budget": cpus, "ram_budget_mb": _total_ram_mb()}
+        desired = getattr(self, "resource_policy", None)
+        result["resource_policy_revision"] = desired["revision"] if desired else 0
+        result["resource_policy_error"] = getattr(self, "resource_policy_error", "")
         result["pending_uploads"] = (self.db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
                                      if hasattr(self, "db") else None)
         # The controller must not infer a finished archive from a terminal job
@@ -331,7 +358,7 @@ class Agent:
                 result["assets"].append(name)
         # Windows host execution is intentionally demo-only.
         if sys.platform != "linux":
-            return result
+            return node_policy.apply(result, desired)
         try:
             self._exec(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=8)
             result["docker_available"] = True
@@ -356,11 +383,34 @@ class Agent:
                     if isinstance(pattern, str) and pattern)]
                 result["gpus"].append({"uuid": gpu_uuid, "name": name, "total_mb": total_mb,
                     "free_mb": free_mb, "reserve_mb": configured.get("reserve_mb", 2048),
-                    "max_jobs": configured.get("max_jobs", 1), "profiles": gpu_profiles})
+                    "max_jobs": configured.get("max_jobs", 1), "profiles": gpu_profiles,
+                    "local_enabled": (isinstance(configured.get("max_jobs", 1), int)
+                        and not isinstance(configured.get("max_jobs", 1), bool)
+                        and configured.get("max_jobs", 1) > 0 and bool(gpu_profiles))})
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             # A failed query never means that all VRAM is available.
             result["gpus"] = []
-        return result
+        return node_policy.apply(result, desired)
+
+    def _accept_resource_policy(self, value, snapshot):
+        if value is None:
+            return
+        desired = node_policy.validate(value)
+        previous = self.resource_policy
+        revision = previous["revision"] if previous else 0
+        if desired["revision"] < revision:
+            return  # Delayed responses cannot roll back an accepted preference.
+        if desired["revision"] == revision:
+            if desired != previous:
+                raise ValueError("Resource policy changed without a new revision")
+            return
+        desired = node_policy.validate_for_worker(desired, snapshot)
+        # Persist before advertising the acknowledgment. A lost response or a
+        # restart reuses this overlay without rewriting node.ready.json.
+        self._set_meta("resource_policy", {"node_id": self.config["node_id"],
+                       "hub_url": self.config["hub_url"].rstrip("/"), "value": desired})
+        self.resource_policy = desired
+        self.resource_policy_error = ""
 
     def _report(self, record):
         report = {key: record.get(key, default) for key, default in (
@@ -410,6 +460,12 @@ class Agent:
             self.last_error = None
             self.mode = response.get("mode", self.mode)
             self._set_meta("hub_mode", self.mode)
+            try:
+                self._accept_resource_policy(response.get("resource_policy"), snapshot)
+            except (ValueError, TypeError, OverflowError) as error:
+                # Changed local authorization or unavailable GPU telemetry must
+                # not interrupt ordinary reports, commands, or artifact sync.
+                self.resource_policy_error = str(error)[:1000]
             self.project_delivery.accept(response.get("project_deployments", []))
             sent = {report["id"]: report["seq"] for report in payload["reports"]}
             with self.db:

@@ -72,7 +72,8 @@ The example **E:/PythonProjects/SASRec_Original** lacks complete native training
 
 ## Resources and networking
 
-Default node budgets are conservative. Independent experiments on different GPUs require sufficient node concurrency; GPU sharing additionally requires each task to allow sharing and sufficient per-GPU slots and memory budgets.
+New projects allow GPU sharing. External programs using a GPU do not themselves prevent admission. Validate a short experiment, then edit node/GPU concurrency, CPU/RAM budgets and VRAM headroom under **Compute → Resource settings**. Single experiments and matrices can override their resources and sharing mode. Exclusive use applies only to experiments managed by this software. Admission checks current free resources and conservatively reserves existing experiments' declared budgets.
+Upgrades preserve existing settings; a node previously limited to one experiment can now be adjusted in the form. Offline updated nodes receive saved settings after reconnecting, with applied status shown after acknowledgement. Lower limits do not stop running experiments. Remote resource settings require both Center and Worker 0.4.3 or newer.
 Multi-GPU execution of a single experiment and automatic fastest-allocation selection are not implemented. Free VRAM is not free compute.
 
 A pairing address must be reachable from the worker; a remote computer's localhost is that computer itself. Update connection settings when the controller address/port changes.
@@ -87,7 +88,7 @@ An offline worker does not silently cause a duplicate copy of its experiment to 
 
 Available in Experiment Center and Experiment Worker from **0.3.0-rc.2**. Each application updates its own role; update both if both are installed on the same computer.
 
-**Update workers first in a multi-computer deployment.** Let the updated workers reconnect and complete synchronization before updating Center. Center requires a fresh idle confirmation from each worker; an offline worker or older agent that cannot provide it prevents in-app installation. Update that worker and restore its connection before retrying Center.
+**Workers may be updated before Center in a multi-computer deployment.** From 0.4.2, Center is not blocked solely by disconnected nodes without unfinished work or by missing fresh snapshots. Active experiments, unacknowledged commands and registered pending transfers still block installation. If a running older Center is blocked only by disconnected nodes, stop that old management service and manually install the new version using the original data directory.
 
 1. Open the application's status window or tray menu and choose **Check for updates**. The update window shows your current version, the available version and its release notes.
 2. Choose to download the update. The application retrieves the same-role Windows `Setup.exe` from [this project's GitHub Releases](https://github.com/Pencilfinely/experiment-manager/releases) and verifies its published size and SHA-256. A failed check prevents installation; retry the download or use the manual procedure below.
@@ -139,4 +140,4 @@ Replacing/removing application files and deleting experiment data are separate a
 | Update check or download fails | Check access to GitHub Releases and try again; manual same-role installation remains available |
 | Update size or checksum does not match | Do not run that download; retry and use the checksum published with the intended release |
 | Update is downloaded but installation is blocked | Finish active work and pending uploads, then retry; check the application logs if service state cannot be verified |
-| Center cannot confirm a worker is idle | Update that worker first, reconnect it and complete synchronization, then retry Center; offline or older agents with unknown status block installation |
+| Center cannot confirm a worker is idle | Check active experiments and pending transfers. If an older Center is blocked only by disconnected nodes, stop its service and manually install 0.4.2 or newer using the original data directory |

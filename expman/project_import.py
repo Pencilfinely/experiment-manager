@@ -144,7 +144,7 @@ def _validate_draft(payload, source):
         value = resources.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 10**9:
             raise ValueError("Resource budget must be positive: " + key)
-    if not isinstance(resources.get("exclusive", True), bool):
+    if not isinstance(resources.get("exclusive", False), bool):
         raise ValueError("resources.exclusive must be boolean")
     harness = validate_manifest(payload.get("harness"))
     experiments = copy.deepcopy(payload.get("experiments"))
@@ -219,7 +219,7 @@ class ProjectImports:
                 deleted = {row[0] for row in self.hub.db.execute("SELECT digest FROM projects WHERE deleted_at IS NOT NULL")}
             return {"available": True, "picker_available": os.name == "nt", "imports":
                     [self._public(state) for state in sorted((s for s in states if isinstance(s, dict)
-                        and s.get("project", {}).get("digest") not in deleted),
+                        and (s.get("project") or {}).get("digest") not in deleted),
                                                              key=lambda s: s.get("updated", 0), reverse=True)[:100]]}
 
     def test_metrics(self, payload):

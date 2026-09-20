@@ -151,7 +151,7 @@ def prepare_project(source, output, entry=None, project_id=None):
         'source': str(source), 'include': report['source_policy']['include'],
         'exclude_directories': report['source_policy']['exclude_directories'], 'assets': assets,
         'runtime': {'imports': report['dependency_hints'], 'requirements': []},
-        'resources': {'gpu_memory_mb': 4096, 'cpu': 2, 'ram_mb': 4096, 'exclusive': True},
+        'resources': {'gpu_memory_mb': 4096, 'cpu': 2, 'ram_mb': 4096, 'exclusive': False},
         'reviewed': False, 'review_notes': review + report['warnings']}
     output.mkdir(parents=True, exist_ok=True)
     common.atomic_json(output / 'project.json', project)

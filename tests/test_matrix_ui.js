@@ -41,6 +41,7 @@ function launchContext(api) {
   const context = baseContext({
     matrixDraft: {name: 'Matrix', spec: {params: {seed: 42}}, datasets: [], grid: {}},
     matrixAxes: [], readScheduling: () => ({scheduling: {mode: 'auto'}, priority: 0}),
+    readTaskResources: (_id, original) => original || {gpu_memory_mb: 4096, cpu: 1, ram_mb: 1024, exclusive: false},
     matrixEditorBusy: false,
     matrixStartRequests: new Map(), matrixPendingLaunches: new Map(), matrixStartsInFlight: new Set(),
     requestId: () => `request-${++request}`,

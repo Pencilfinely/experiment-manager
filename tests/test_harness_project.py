@@ -105,6 +105,7 @@ class HarnessProjectTests(unittest.TestCase):
         harness = common.read_json(self.external / "harness.json")
         project = common.read_json(self.external / "project.json")
         experiment = common.read_json(self.external / "experiments/default.json")
+        self.assertFalse(project['resources']['exclusive'])
         self.assertEqual(harness["command"], ["{python}", "main.py"])
         self.assertEqual(harness["fixed_params"]["gpu_id"], "{env.CUDA_VISIBLE_DEVICES}")
         self.assertEqual(harness["fixed_params"]["data_dir"], "{assets.dataset}/")

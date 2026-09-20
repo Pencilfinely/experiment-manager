@@ -7,6 +7,7 @@ const names = {queued:'排队中',assigned:'已分配',preparing:'准备资源',
 const terminal = ['succeeded','failed','interrupted','paused','canceled'];
 const projectSelections = new Map(), projectUploads = new Map();
 let projectPresets = [];
+let nodeResourceEditor=null,nodeResourceBusy=false;
 let currentView='overview', localImportAvailable=null, importJob=null, importDraft=null, importExperimentIndex=0, importJsonDirty=false, importPolling=false;
 const viewLabels={overview:['总览','实验、算力和算法项目，都在这里管理。'],experiments:['实验记录','查看进度、指标和结果，管理每一次运行。'],matrices:['实验矩阵','组合数据集与参数，自动分配算力，统一整理结果。'],compute:['算力管理','连接 Windows 与 Ubuntu 算力机，查看资源和接单状态。'],projects:['算法项目','从原始目录导入，检查配置，再分发到算力机。'],settings:['设置与帮助','管理连接与可选的 AI 辅助服务。']};
 const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
@@ -107,7 +108,7 @@ $('quick-worker').onclick=()=>{showView('compute');$('add-worker').click();};
 $('quick-run').onclick=()=>showView('projects');
 $('quick-import').onclick=()=>{showView('projects');$('import-local').click();};
 function objectFields(container,values,onChange,definitions={},labels={}){
-  container.replaceChildren();
+  container.replaceChildren();const inputs={};
   for(const key of Object.keys(values)){
     const value=values[key],definition=definitions[key]||{},label=node('label',labels[key]||key);let input;
     if(Array.isArray(definition.choices)){input=node('select');for(const choice of definition.choices){const option=node('option',choice);option.value=JSON.stringify(choice);option.selected=Object.is(choice,value);input.append(option);}input.onchange=()=>onChange(key,JSON.parse(input.value));}
@@ -115,9 +116,28 @@ function objectFields(container,values,onChange,definitions={},labels={}){
     else if(typeof value==='number'||['number','integer'].includes(definition.type)){input=node('input');input.type='number';input.step=definition.type==='integer'?'1':'any';input.value=value??'';input.required=!!definition.required;input.oninput=()=>{input.setCustomValidity('');if(input.value===''||!Number.isFinite(Number(input.value))){input.setCustomValidity('请输入有效数字');return;}onChange(key,Number(input.value));};}
     else if(value!==null&&typeof value==='object'){input=node('textarea');input.rows=3;input.value=JSON.stringify(value);input.oninput=()=>{try{onChange(key,JSON.parse(input.value));input.setCustomValidity('');}catch{input.setCustomValidity('请输入有效 JSON');}};}
     else{input=node('input');input.type='text';input.value=value??'';input.required=!!definition.required;input.oninput=()=>onChange(key,input.value);}
-    input.setAttribute('aria-label',labels[key]||key);label.append(input);if(definition.description)label.append(node('small',definition.description));container.append(label);
+    if(definition.min!==undefined)input.min=String(definition.min);if(definition.max!==undefined)input.max=String(definition.max);
+    input.setAttribute('aria-label',labels[key]||key);inputs[key]=input;label.append(input);if(definition.description)label.append(node('small',definition.description));container.append(label);
   }
   if(!container.children.length)container.append(node('p','没有需要填写的参数。','muted'));
+  return inputs;
+}
+function taskResources(resources={}){return {gpu_memory_mb:4096,cpu:1,ram_mb:1024,exclusive:false,...resources};}
+function renderTaskResources(id,resources,onChange){
+  const container=$(id),values=taskResources(resources),fields=node('div',undefined,'form-grid resource-budget-grid');
+  container.replaceChildren(node('h3','本次实验资源'),node('p','按实验的峰值需求填写预算。资源充足时可与其他任务共用 GPU；空闲显存不代表空闲算力。','muted'));
+  container.resourceInputs=objectFields(fields,{gpu_memory_mb:values.gpu_memory_mb,cpu:values.cpu,ram_mb:values.ram_mb},(key,value)=>onChange(key,value),
+    {gpu_memory_mb:{type:'integer',min:0,max:1048576},cpu:{type:'number',min:0.1,max:4096},ram_mb:{type:'integer',min:64,max:16777216}},
+    {gpu_memory_mb:'显存预算 (MiB)',cpu:'CPU 核心预算',ram_mb:'内存预算 (MiB)'});
+  const label=editField('GPU 使用方式',values.exclusive?'exclusive':'shared',value=>onChange('exclusive',value==='exclusive'),{choices:[['shared','允许共享：满足预算即可运行'],['exclusive','实验台内独占：同卡不运行其他实验台任务']]});
+  container.resourceInputs.exclusive=label.children[0];container.append(fields,label,node('p','独占仅约束本实验台提交的任务，不会锁住显卡或阻止其他用户的程序。预算用于接单检查，显存不会被硬隔离。','muted'));
+}
+function readTaskResources(id,original={}){
+  const values=taskResources(original),inputs=$(id).resourceInputs;if(!inputs)throw new Error('请先选择实验配置。');
+  for(const [key,low,high,integer] of [['gpu_memory_mb',0,1048576,true],['cpu',0.1,4096,false],['ram_mb',64,16777216,true]]){
+    const raw=inputs[key].value,value=Number(raw);if(raw===''||!Number.isFinite(value)||value<low||value>high||(integer&&!Number.isInteger(value)))throw new Error(inputs[key].getAttribute('aria-label')+' 超出有效范围。');values[key]=value;
+  }
+  if(!['shared','exclusive'].includes(inputs.exclusive.value))throw new Error('请选择 GPU 使用方式。');values.exclusive=inputs.exclusive.value==='exclusive';return values;
 }
 function renderProjectParameters(){let values;try{values=JSON.parse($('project-params').value);}catch{return;}if(!values||typeof values!=='object'||Array.isArray(values))return;objectFields($('project-param-fields'),values,(key,value)=>{values[key]=value;$('project-params').value=JSON.stringify(values,null,2);});}
 $('project-params').onchange=renderProjectParameters;
@@ -185,7 +205,7 @@ function openProjectRun(project){
   renderScheduling('project-scheduling',{mode:'auto'},0);
   $('project-run-title').textContent='创建实验 / New experiment · '+project.name;$('project-run-form').hidden=false;fillProjectPreset();$('project-run-form').scrollIntoView({behavior:'smooth'});
 }
-function fillProjectPreset(){const selectedPreset=projectPresets[Number($('project-preset').value)];if(!selectedPreset)return;$('project-run-name').value=selectedPreset.template.name;$('project-params').value=JSON.stringify(selectedPreset.template.params,null,2);renderProjectParameters();}
+function fillProjectPreset(){const selectedPreset=projectPresets[Number($('project-preset').value)];if(!selectedPreset)return;$('project-run-name').value=selectedPreset.template.name;$('project-params').value=JSON.stringify(selectedPreset.template.params,null,2);renderProjectParameters();renderTaskResources('project-resources',selectedPreset.template.resources,()=>{});}
 $('project-preset').onchange=fillProjectPreset;
 $('project-run-close').onclick=()=>{$('project-run-form').hidden=true;};
 $('project-run-form').onsubmit=async event=>{
@@ -193,6 +213,7 @@ $('project-run-form').onsubmit=async event=>{
   try{
     const preset=projectPresets[Number($('project-preset').value)];if(!preset)throw new Error('请选择节点和实验配置。');
     const spec=JSON.parse(JSON.stringify(preset.template));spec.name=$('project-run-name').value.trim();spec.params=JSON.parse($('project-params').value);
+    spec.resources=readTaskResources('project-resources',spec.resources);
     applyScheduling(spec,readScheduling('project-scheduling'));
     if(!spec.params||typeof spec.params!=='object'||Array.isArray(spec.params))throw new Error('参数必须是 JSON 对象。');
     const result=await api('/api/jobs',{request_id:requestId(),spec});notify(`已提交 ${result.ids.length} 个实验。系统会按所选算力策略匹配节点。`);showView('experiments');await refresh();
@@ -232,11 +253,70 @@ $('pair-form').onsubmit=async event=>{
   }catch(error){notify('配对失败 / Pairing failed: '+error.message);}
 };
 async function refresh(){if(!token)return;try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
+function openNodeResources(id){
+  if(nodeResourceBusy)return;const worker=(state.nodes||[]).find(item=>item.id===id);if(!worker)return;
+  const snapshot=worker.snapshot||{},desired=worker.resource_policy||{},policy={max_running:2,max_prefetch:4,cpu_budget:4,ram_budget_mb:8192,...snapshot.policy,...desired.policy};
+  nodeResourceEditor={id,revision:desired.revision||0,inputs:{},gpus:copy(snapshot.gpus||[])};
+  $('node-resource-title').textContent=id+' · 资源设置';
+  const limits=snapshot.resource_policy_limits||{};
+  nodeResourceEditor.inputs.policy=objectFields($('node-resource-fields'),{max_running:policy.max_running,max_prefetch:policy.max_prefetch,cpu_budget:policy.cpu_budget,ram_budget_mb:policy.ram_budget_mb},()=>{},
+    {max_running:{type:'integer',min:0,max:256,description:'整台机器同时运行的实验上限。0 表示暂停启动。'},max_prefetch:{type:'integer',min:0,max:1024,description:'包含正在运行和待执行的实验，建议不小于并发数。'},cpu_budget:{type:'number',min:0,max:limits.cpu_budget??snapshot.cpu_count??4096},ram_budget_mb:{type:'integer',min:0,max:limits.ram_budget_mb??16777216}},
+    {max_running:'节点并发上限',max_prefetch:'本机任务总上限',cpu_budget:'CPU 总预算（核心）',ram_budget_mb:'内存总预算 (MiB)'});
+  const gpuContainer=$('node-resource-gpus');gpuContainer.replaceChildren();nodeResourceEditor.inputs.gpu_policy={};
+  for(const gpu of nodeResourceEditor.gpus){
+    const section=node('div',undefined,'resource-gpu'),fields=node('div',undefined,'form-grid'),settings={...gpu,...desired.gpu_policy?.[gpu.uuid]};
+    section.append(node('h4',gpu.name),node('p',gpu.uuid,'resource-uuid'));
+    if(gpu.local_enabled!==true)section.append(node('p','此卡未在算力端启用或未通过环境验证。请在该机器重新检查并启用后再配置。','muted'));
+    else{nodeResourceEditor.inputs.gpu_policy[gpu.uuid]=objectFields(fields,{max_jobs:settings.max_jobs??1,reserve_mb:settings.reserve_mb??2048},()=>{},
+      {max_jobs:{type:'integer',min:0,max:256,description:'允许同卡运行多个实验时填 2 或更高；0 暂停在此卡启动新实验。'},reserve_mb:{type:'integer',min:0,max:gpu.total_mb,description:'从实时空闲显存中额外扣除，给波动留出余量。'}},
+      {max_jobs:'此卡并发上限',reserve_mb:'显存预留 (MiB)'});section.append(fields);}
+    gpuContainer.append(section);
+  }
+  if(!nodeResourceEditor.gpus.length)gpuContainer.append(node('p','尚无 GPU 信息；节点环境检查完成后重新载入。','muted'));
+  inlineFeedback('node-resource-feedback','');$('node-resource-form').hidden=false;updateNodeResourceStatus();setNodeResourceBusy(false);$('node-resource-form').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function updateNodeResourceStatus(){
+  if(!nodeResourceEditor||$('node-resource-form').hidden)return;
+  const worker=(state.nodes||[]).find(item=>item.id===nodeResourceEditor.id),snapshot=worker?.snapshot||{},supported=(snapshot.capabilities||[]).includes('node-resource-policy-v1');
+  const saved=worker?.resource_policy?.revision||0,ack=snapshot.resource_policy_revision||0,revision=nodeResourceEditor.revision,online=!!worker&&Date.now()/1000-worker.last_seen<45;
+  const expected=Math.max(saved,revision);
+  let message=!supported?'该算力端尚不支持远程资源设置，请先升级算力端并等待它连接。':saved>revision?'资源设置已被另一页面修改。当前输入已保留，点击“重新载入设置”后再编辑保存。':expected>ack?'设置已保存，等待算力端连接并确认生效。':expected<ack?'算力端与管理端的资源设置版本不同，请重新载入设置后保存以重新同步。':expected?'算力端已确认上次保存的资源设置。':'当前使用算力端本地资源设置。';
+  if(snapshot.resource_policy_error)message+=' 暂未生效：'+snapshot.resource_policy_error;
+  if(supported&&!online)message+=' 节点离线，可保存设置，重连后生效。';
+  $('node-resource-sync').textContent=message;$('node-resource-save').disabled=nodeResourceBusy||!supported;
+}
+function setNodeResourceBusy(busy){
+  nodeResourceBusy=busy;const worker=(state.nodes||[]).find(item=>item.id===nodeResourceEditor?.id),supported=(worker?.snapshot?.capabilities||[]).includes('node-resource-policy-v1');
+  for(const control of $('node-resource-form').querySelectorAll('input,select,button'))control.disabled=busy||(!supported&&control.tagName!=='BUTTON');
+  updateNodeResourceStatus();
+}
+function nodeResourcePayload(){
+  if(!nodeResourceEditor)throw new Error('请先选择算力机。');
+  const read=inputs=>Object.fromEntries(Object.entries(inputs).map(([key,input])=>{
+    const value=Number(input.value),low=Number(input.min||0),high=input.max===''?Infinity:Number(input.max);
+    if(input.value===''||!Number.isFinite(value)||value<low||value>high||(input.step==='1'&&!Number.isInteger(value)))throw new Error(input.getAttribute('aria-label')+' 超出有效范围。');return [key,value];
+  }));
+  return {node_id:nodeResourceEditor.id,revision:nodeResourceEditor.revision,policy:read(nodeResourceEditor.inputs.policy),gpu_policy:Object.fromEntries(Object.entries(nodeResourceEditor.inputs.gpu_policy).map(([uuid,inputs])=>[uuid,read(inputs)]))};
+}
+async function saveNodeResources(){
+  if(nodeResourceBusy||!nodeResourceEditor||!$('node-resource-form').reportValidity())return;
+  const worker=(state.nodes||[]).find(item=>item.id===nodeResourceEditor.id);if(!(worker?.snapshot?.capabilities||[]).includes('node-resource-policy-v1'))return;
+  setNodeResourceBusy(true);
+  try{const result=await api('/api/node-policy',nodeResourcePayload());nodeResourceEditor.revision=result.resource_policy.revision;worker.resource_policy=result.resource_policy;
+    inlineFeedback('node-resource-feedback','资源设置已保存。只影响后续启动，不中断正在运行的实验。');await refresh();}
+  catch(error){inlineFeedback('node-resource-feedback','保存未确认：'+error.message+'。输入已保留；可以重试，相同设置不会重复应用。',true);}
+  finally{setNodeResourceBusy(false);}
+}
+$('node-resource-form').onsubmit=event=>{event.preventDefault();void saveNodeResources();};
+$('node-resource-close').onclick=()=>{$('node-resource-form').hidden=true;nodeResourceEditor=null;};
+$('node-resource-reload').onclick=()=>nodeResourceEditor&&openNodeResources(nodeResourceEditor.id);
 function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
   $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单和启动新任务':online(n)?'允许运行 · 本地策略仍需满足':'已有任务保持归属，等待重新连接'));
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
     for(const g of snap.gpus||[]){const gpu=node('div',`${g.name} · 空闲 ${Number.isFinite(g.free_mb)?(g.free_mb/1024).toFixed(1):'?'} / ${(g.total_mb/1024).toFixed(1)} GiB`,'gpu'),bar=node('div',undefined,'bar'),fill=node('i');fill.style.width=Math.max(0,Math.min(100,100*(1-g.free_mb/g.total_mb)))+'%';bar.append(fill);gpu.append(bar);box.append(gpu);}
     if(Number.isFinite(snap.pending_uploads))box.append(node('p',`待回传文件：${snap.pending_uploads}`));
+    box.append(node('p',`节点并发上限 ${snap.policy?.max_running??'—'} · `+(snap.gpus||[]).map(g=>`${g.name}：每卡 ${g.max_jobs??1} 个任务`).join('；'),'muted'));
+    const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);
     const templateDetails=node('details',undefined,'worker-templates');templateDetails.append(node('summary','高级：节点任务模板'));
     for(const template of (Array.isArray(snap.task_templates)?snap.task_templates:[])){
       const use=node('button','填入任务 / Use: '+String(template.name||'template'),'subtle');
@@ -244,7 +324,7 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
     }
     if(templateDetails.children.length>1)box.append(templateDetails);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
-  renderProjects();renderJobs();renderOverview();
+  updateNodeResourceStatus();renderProjects();renderJobs();renderOverview();
 }
 function renderJobs(){const filter=$('filter').value.toLowerCase();const jobs=(state.jobs||[]).filter(j=>JSON.stringify([j.spec.name,j.spec.algorithm,j.spec.group]).toLowerCase().includes(filter));$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;for(const j of jobs){const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`));const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));const met=j.metrics||{};row.append(title,status,node('td',j.node_id||'等待匹配'),(()=>{const cell=node('td');cell.append(jobTimer(j));return cell;})(),node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));row.onclick=()=>detail(j.id,true);$('jobs').append(row);}}
 $('filter').oninput=renderJobs;
@@ -380,7 +460,7 @@ function renderImportDraft(draft){
   }
   if(!$('import-assets').children.length)$('import-assets').append(node('p','未自动识别数据目录。若算法需要外部数据，请在高级项目配置的 assets 中添加路径。','muted'));
   $('import-modules').value=(project.runtime?.imports||[]).join('\n');$('import-requirements').value=(project.runtime?.requirements||[]).join('\n');
-  objectFields($('import-resource-fields'),project.resources||{},(key,value)=>{project.resources[key]=value;draftChanged();},{cpu:{type:'integer'},ram_mb:{type:'integer'},gpu_memory_mb:{type:'integer'}},{cpu:'CPU 核心预算',ram_mb:'内存预算 (MiB)',gpu_memory_mb:'显存预算 (MiB)',exclusive:'独占 GPU'});
+  objectFields($('import-resource-fields'),project.resources||{},(key,value)=>{project.resources[key]=value;draftChanged();},{cpu:{type:'number'},ram_mb:{type:'integer'},gpu_memory_mb:{type:'integer'},exclusive:{description:'不勾选时允许共享；独占只约束本实验台任务，不限制其他用户的程序。'}},{cpu:'CPU 核心预算',ram_mb:'内存预算 (MiB)',gpu_memory_mb:'显存预算 (MiB)',exclusive:'在本实验台内独占 GPU'});
   $('import-resume-status').textContent=harness.resume?.supported?'续训：使用配置中的原生续训命令':'续训：未启用，原算法没有配置原生续训入口';
   $('import-file-summary').textContent=preview?`代码 ${preview.source_files} 个文件 · 数据 ${preview.asset_files} 个文件 · 共 ${((preview.source_bytes+preview.asset_bytes)/1024/1024).toFixed(1)} MiB${preview.truncated?'（下方显示部分文件）':''}`:'保存草稿后检查分发文件。';
   $('import-file-preview').replaceChildren(...(preview?.files||[]).map(file=>{const row=node('div');row.append(node('span',file.path),node('span',(file.bytes/1024).toFixed(1)+' KiB'));return row;}));
@@ -556,6 +636,7 @@ $('import-ai-assist').onclick=async()=>{
 $('import-ai-apply').onclick=()=>{if(!aiSuggestion)return;const suggestion=aiSuggestion;renderImportDraft({...importDraft,...suggestion.draft});inlineFeedback('import-ai-feedback','建议已应用到草稿。请核对参数、数据和指标，保存后再发布。');};
 
 let matrixDraft=null,matrixTemplates=[],matrixAxes=[],matrixResultId=null,matrixLoading=false,matrixEditorBusy=false;
+let matrixTemplateDrafts=new Map(),matrixTemplateKey='current';
 const matrixStartRequests=new Map(),matrixPendingLaunches=new Map(),matrixStartsInFlight=new Set();
 function availableTemplates(){
   const result=[],seen=new Set();for(const worker of state.nodes||[])for(const template of worker.snapshot?.task_templates||[]){
@@ -579,11 +660,13 @@ function matrixPayload(){
   const name=$('matrix-name').value.trim();if(!name)throw new Error('请填写矩阵名称。');
   const grid={};for(const axis of matrixAxes){if(!axis.key.trim())throw new Error('请填写每个参数维度的名称。');if(axis.key in grid)throw new Error('参数维度重复：'+axis.key);const values=lines(axis.text);if(!values.length)throw new Error('参数 '+axis.key+' 至少需要一个候选值。');grid[axis.key]=values.map(value=>axis.type==='string'?value:parseValue(value));}
   const payload={name,description:$('matrix-description').value.trim(),spec:copy(matrixDraft.spec),datasets:copy(matrixDraft.datasets||[]),grid,...readScheduling('matrix-scheduling')};
+  payload.spec.resources=readTaskResources('matrix-resources',payload.spec.resources);
   if(matrixDraft.id){payload.id=matrixDraft.id;payload.revision=matrixDraft.revision;}
   return payload;
 }
 function openMatrix(definition){
   matrixTemplates=availableTemplates();matrixDraft=definition?copy(definition):{name:'',description:'',spec:matrixTemplates[0]?copy(matrixTemplates[0].spec):null,datasets:[],grid:{}};
+  matrixTemplateDrafts=new Map();matrixTemplateKey='current';
   matrixDraft.datasets=(matrixDraft.datasets||[]).map(dataset=>({...dataset,params:dataset.params||{}}));matrixDraft.grid||={};
   if(!definition&&matrixDraft.spec)matrixDraft.spec.scheduling={mode:'auto'};
   $('matrix-editor-title').textContent=matrixDraft.id?'编辑实验矩阵':'新建实验矩阵';$('matrix-name').value=matrixDraft.name||'';$('matrix-description').value=matrixDraft.description||'';$('matrix-name').maxLength=160;
@@ -594,8 +677,19 @@ function openMatrix(definition){
   renderMatrixParameters();renderMatrixDatasets();renderMatrixAxes();renderScheduling('matrix-scheduling',matrixDraft.scheduling||matrixDraft.spec?.scheduling||{mode:'auto'},matrixDraft.priority??matrixDraft.spec?.priority??0);
   $('matrix-preview-result').hidden=true;inlineFeedback('matrix-feedback','');$('matrix-form').hidden=false;showView('matrices');$('matrix-form').scrollIntoView({behavior:'smooth'});
 }
-function renderMatrixParameters(){if(matrixDraft.spec)objectFields($('matrix-base-params'),matrixDraft.spec.params||{},(key,value)=>{matrixDraft.spec.params[key]=value;});else $('matrix-base-params').replaceChildren(node('p','尚未选择基础配置。','muted'));}
-$('matrix-template').onchange=()=>{if($('matrix-template').value==='current')return;const item=matrixTemplates[Number($('matrix-template').value)];if(!item)return;matrixDraft.spec=copy(item.spec);renderMatrixParameters();};
+function renderMatrixParameters(){
+  if(matrixDraft.spec){objectFields($('matrix-base-params'),matrixDraft.spec.params||{},(key,value)=>{matrixDraft.spec.params[key]=value;});matrixDraft.spec.resources=taskResources(matrixDraft.spec.resources);renderTaskResources('matrix-resources',matrixDraft.spec.resources,(key,value)=>{matrixDraft.spec.resources[key]=value;});}
+  else{$('matrix-base-params').replaceChildren(node('p','尚未选择基础配置。','muted'));$('matrix-resources').replaceChildren();delete $('matrix-resources').resourceInputs;}
+}
+function switchMatrixTemplate(){
+  const key=$('matrix-template').value;if(key===matrixTemplateKey)return;
+  try{
+    if(matrixDraft.spec){matrixDraft.spec.resources=readTaskResources('matrix-resources',matrixDraft.spec.resources);matrixTemplateDrafts.set(matrixTemplateKey,copy(matrixDraft.spec));}
+    const spec=matrixTemplateDrafts.get(key)||matrixTemplates[Number(key)]?.spec;if(!spec){$('matrix-template').value=matrixTemplateKey;return;}
+    matrixDraft.spec=copy(spec);matrixTemplateKey=key;renderMatrixParameters();
+  }catch(error){$('matrix-template').value=matrixTemplateKey;inlineFeedback('matrix-feedback',error.message,true);}
+}
+$('matrix-template').onchange=switchMatrixTemplate;
 function renderDatasetParameters(container,dataset){
   container.replaceChildren();for(const [originalKey,value] of Object.entries(dataset.params||{})){let key=originalKey;const row=node('div',undefined,'dataset-parameter-row');row.append(editField('覆盖参数',key,next=>{if(!next.trim())throw new Error('参数名不能为空');if(next===key)return;if(next in dataset.params)throw new Error('参数已经存在');dataset.params[next]=dataset.params[key];delete dataset.params[key];key=next;}),editField('参数值',valueText(value),(next,input)=>{const base=matrixDraft.spec?.params?.[key];dataset.params[key]=typeof base==='string'?next:parseValue(next);}),smallButton('移除',()=>{delete dataset.params[key];renderDatasetParameters(container,dataset);},true));container.append(row);}
 }

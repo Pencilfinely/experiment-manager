@@ -160,7 +160,7 @@ def import_project(root, project, config_path='config/video_games_full.json', na
                 'command': ['python', '-m', 'expman.adapters.sasrec', '--project', '/workspace/code/SASRec_Original'],
                 'environments': [{'profile': profile_name, 'image': environment['image']}],
                 'tags': config['tags'], 'assets': [asset_id], 'params': params,
-                'resources': {'gpu_memory_mb': 6000, 'ram_mb': 8192, 'cpu': 2, 'exclusive': True}}
+                'resources': {'gpu_memory_mb': 6000, 'ram_mb': 8192, 'cpu': 2, 'exclusive': False}}
         formal = validate_task(base)
         short = copy.deepcopy(formal)
         short['name'] = name + '-short'

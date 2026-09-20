@@ -28,6 +28,8 @@ from . import __version__
 from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256_file, validate_task
 from .scheduler import choose_assignment
 from .matrix import MatrixHubMixin, initialize as initialize_matrices
+from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_policies,
+                          validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -150,6 +152,7 @@ def _snapshot(value):
         names = gpu.get("profiles", [])
         if not isinstance(names, list) or any(not isinstance(x, str) for x in names):
             raise APIError(400, "GPU.profiles must be a string list")
+    validate_policy_snapshot(value)
     return value
 
 
@@ -186,7 +189,7 @@ def inspect_update_state(db):
                 "管理端当前无未完成实验或已登记的文件传输，可以安装更新；离线节点恢复后继续同步", **counts)
 
 
-class Hub(MatrixHubMixin):
+class Hub(MatrixHubMixin, NodePolicyHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -261,6 +264,7 @@ class Hub(MatrixHubMixin):
             self.db.execute("INSERT OR IGNORE INTO nodes(id) VALUES (?)", (node_id,))
         self._cleanup_project_archives()
         initialize_matrices(self.db)
+        initialize_node_policies(self.db)
 
     @contextmanager
     def transaction(self):
@@ -395,6 +399,7 @@ class Hub(MatrixHubMixin):
                 item = dict(row)
                 item["snapshot"] = json.loads(item["snapshot"])
                 item["online"] = timestamp - item["last_seen"] <= 45
+                item["resource_policy"] = self._node_resource_policy(item["id"])
                 nodes.append(item)
             projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
@@ -599,8 +604,11 @@ class Hub(MatrixHubMixin):
             capabilities = snapshot.get("capabilities", [])
             deployments = [item for item in deployments if
                 ("project-delete-v1" if item["action"] == "delete" else "project-bundle-v1") in capabilities]
-            return {"jobs": jobs, "mode": mode, "ack": ack,
-                    "project_deployments": deployments}
+            response = {"jobs": jobs, "mode": mode, "ack": ack,
+                        "project_deployments": deployments}
+            if NODE_POLICY_CAPABILITY in capabilities:
+                response["resource_policy"] = self._node_resource_policy(node_id)
+            return response
 
     @staticmethod
     def _project_digest(value):
@@ -773,7 +781,8 @@ class Hub(MatrixHubMixin):
                     # and editable import drafts are never deletion targets.
                     for state_file in (self.root / "imports").glob("*/state.json"):
                         state = read_json(state_file, {})
-                        if state.get("project", {}).get("digest") != digest:
+                        # Saving an unpublished import draft sets project=None.
+                        if (state.get("project") or {}).get("digest") != digest:
                             continue
                         for archive in state_file.parent.glob("bundle-*.zip"):
                             safe_child(self.root, archive.relative_to(self.root).as_posix()).unlink(missing_ok=True)
@@ -1044,6 +1053,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          "/api/node-policy": hub.set_node_policy,
                           "/api/scheduling/preview": hub.scheduling_preview,
                           "/api/matrices/save": hub.matrix_save, "/api/matrices/preview": hub.matrix_preview,
                           "/api/matrices/start": hub.matrix_start, "/api/matrices/delete": hub.matrix_delete,
