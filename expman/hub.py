@@ -166,8 +166,9 @@ def inspect_update_state(db):
     uncertain = 0
     for row in db.execute("SELECT id,last_seen,snapshot FROM nodes"):
         node_id, last_seen, serialized = row
-        # An enrollment that has never connected and owns no work has nothing
-        # to drain. Every previously connected node needs fresh positive proof.
+        # Unused enrollments do not need telemetry. Missing or stale proof from
+        # other nodes is diagnostic: controller-owned work is checked above and
+        # remote nodes can resume synchronization after the controller restarts.
         has_work = db.execute("SELECT 1 FROM jobs WHERE node_id=? LIMIT 1", (node_id,)).fetchone()
         if last_seen == 0 and not has_work:
             continue
@@ -181,9 +182,8 @@ def inspect_update_state(db):
         reasons.append(f"{active} 个实验或操作尚未完成")
     if uploads or projects or deployments:
         reasons.append("文件回传或项目分发尚未完成")
-    if uncertain:
-        reasons.append(f"{uncertain} 个节点尚未确认空闲和回传完成；请保持 Worker 在线等待同步，旧版本请先升级 Worker")
-    return dict(ready_for_update=not reasons, detail="；".join(reasons) or "实验和文件回传已完成，可以安装更新", **counts)
+    return dict(ready_for_update=not reasons, detail="；".join(reasons) or
+                "管理端当前无未完成实验或已登记的文件传输，可以安装更新；离线节点恢复后继续同步", **counts)
 
 
 class Hub(MatrixHubMixin):

@@ -185,7 +185,7 @@ class DesktopTests(unittest.TestCase):
         try:
             hub.add_node("offline-worker")
             hub.db.execute("INSERT INTO jobs(id,spec,state,node_id,created,updated) "
-                           "VALUES (?,'{}','succeeded','offline-worker',0,0)", ("a" * 32,))
+                           "VALUES (?,'{}','queued','offline-worker',0,0)", ("a" * 32,))
         finally:
             hub.close()
         database = (self.root / "hub.sqlite3").read_bytes()

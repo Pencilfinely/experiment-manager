@@ -1,4 +1,4 @@
-"""Updater admission uses durable queues, positive telemetry, and a cooperative stop."""
+"""Updater admission preserves durable work and uses a cooperative local stop."""
 from contextlib import closing
 import json
 from pathlib import Path
@@ -145,7 +145,7 @@ class UpdateReadinessTests(unittest.TestCase):
         self.assertEqual(result['active_jobs'], 1)
         self.assertEqual((center / 'hub.json').read_bytes(), before)
 
-    def test_controller_needs_fresh_positive_node_proof_and_fences_new_work(self):
+    def test_controller_node_proof_is_diagnostic_and_fences_new_work(self):
         hub = Hub(self.folder / 'center')
         try:
             hub.add_node('worker-one')
@@ -154,11 +154,19 @@ class UpdateReadinessTests(unittest.TestCase):
                                         (time.time(), {'update_quiescent': False})):
                 with hub.transaction():
                     hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?', (last_seen, json.dumps(snapshot)))
-                self.assertFalse(hub.update_status()['ready_for_update'])
-            with hub.transaction():
-                hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?', (time.time(), '{"update_quiescent":true}'))
+                result = hub.update_status()
+                self.assertTrue(result['ready_for_update'])
+                self.assertEqual(result['unverified_nodes'], 1)
             with hub.update_request():
                 self.assertFalse(hub.update_status(stop=True)['ready_for_update'])
+            hub.project_upload_locks['upload'] = object()
+            self.assertFalse(hub.update_status(stop=True)['ready_for_update'])
+            hub.project_upload_locks.clear()
+            hub.local_imports = SimpleNamespace(threads={'import': object()})
+            try:
+                self.assertFalse(hub.update_status(stop=True)['ready_for_update'])
+            finally:
+                hub.local_imports = None
             self.assertTrue(hub.update_status(stop=True)['ready_for_update'])
             with self.assertRaises(APIError) as denied:
                 with hub.transaction():
@@ -167,6 +175,100 @@ class UpdateReadinessTests(unittest.TestCase):
             with self.assertRaises(APIError):
                 with hub.update_request():
                     self.fail('An HTTP mutation entered after update stop acceptance')
+        finally:
+            hub.close()
+
+    def test_controller_offline_history_survives_accepted_update_and_restart(self):
+        center = self.folder / 'center'
+        hub = Hub(center)
+        try:
+            for node_id in ('offline-worker', 'legacy-worker'):
+                hub.add_node(node_id)
+            with hub.transaction():
+                hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?,mode=? WHERE id=?',
+                    (time.time() - 9 * 3600, '{"update_quiescent":true}', 'drain', 'offline-worker'))
+                hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?,mode=? WHERE id=?',
+                    (time.time(), '{}', 'drain', 'legacy-worker'))
+                for job_id, state, node_id in (('a' * 32, 'succeeded', 'offline-worker'),
+                                                ('b' * 32, 'failed', 'legacy-worker')):
+                    hub.db.execute('INSERT INTO jobs(id,spec,state,node_id,created,updated) VALUES (?,?,?,?,?,?)',
+                                   (job_id, '{"params":{"seed":42}}', state, node_id, 1, 2))
+            before_nodes = [dict(row) for row in hub.db.execute('SELECT * FROM nodes ORDER BY id')]
+            before_jobs = [dict(row) for row in hub.db.execute('SELECT * FROM jobs ORDER BY id')]
+            identity = (center / 'hub.json').read_bytes()
+            result = hub.update_status(stop=True)
+            self.assertTrue(result['ready_for_update'])
+            self.assertEqual(result['unverified_nodes'], 2)
+            self.assertEqual(result['active_jobs'], 0)
+            self.assertIn('管理端当前', result['detail'])
+        finally:
+            hub.close()
+        # Reopening the same data root models replacing program files followed
+        # by a controller restart; enrollment and job history remain unchanged.
+        hub = Hub(center)
+        try:
+            self.assertFalse(hub.updating)
+            self.assertEqual([dict(row) for row in hub.db.execute('SELECT * FROM nodes ORDER BY id')], before_nodes)
+            self.assertEqual([dict(row) for row in hub.db.execute('SELECT * FROM jobs ORDER BY id')], before_jobs)
+            self.assertEqual((center / 'hub.json').read_bytes(), identity)
+            self.assertTrue(hub.update_status()['ready_for_update'])
+        finally:
+            hub.close()
+
+    def test_controller_retains_active_command_upload_and_project_blockers(self):
+        hub = Hub(self.folder / 'center')
+        try:
+            hub.add_node('offline-worker')
+            job_id = 'a' * 32
+            with hub.transaction():
+                hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?',
+                               (time.time() - 3600, '{"update_quiescent":true}'))
+                hub.db.execute("INSERT INTO jobs(id,spec,state,node_id,created,updated) "
+                               "VALUES (?,'{}','succeeded','offline-worker',0,0)", (job_id,))
+                hub.db.execute("INSERT INTO projects(digest,project_id,name,size,created) VALUES ('digest','p','Project',1,0)")
+            for state in ('queued', 'assigned', 'preparing', 'ready', 'starting', 'running', 'unknown'):
+                with self.subTest(state=state), hub.transaction():
+                    hub.db.execute('UPDATE jobs SET state=?', (state,))
+                    result = hub.update_status(stop=True)
+                    self.assertFalse(result['ready_for_update'])
+                    self.assertEqual(result['active_jobs'], 1)
+                    self.assertFalse(hub.updating)
+            with hub.transaction():
+                hub.db.execute("UPDATE jobs SET state='succeeded',command_id=1,command_ack=0")
+                result = hub.update_status(stop=True)
+                self.assertFalse(result['ready_for_update'])
+                self.assertEqual(result['active_jobs'], 1)
+                hub.db.execute('UPDATE jobs SET command_ack=command_id')
+            cases = (
+                ('upload', 'pending_uploads', "INSERT INTO uploads VALUES (?, 'digest', 1)", (job_id,), 'DELETE FROM uploads'),
+                ('project-upload', 'pending_projects', "INSERT INTO project_uploads VALUES ('upload',1,NULL,NULL)", (),
+                 'DELETE FROM project_uploads'),
+            )
+            for name, count, insert, params, cleanup in cases:
+                with self.subTest(name=name), hub.transaction():
+                    hub.db.execute(insert, params)
+                    result = hub.update_status(stop=True)
+                    self.assertFalse(result['ready_for_update'])
+                    self.assertEqual(result[count], 1)
+                    self.assertFalse(hub.updating)
+                    hub.db.execute(cleanup)
+            for state in ('queued', 'downloading', 'installing', 'delete_queued', 'deleting'):
+                with self.subTest(deployment=state), hub.transaction():
+                    hub.db.execute('INSERT OR REPLACE INTO project_deployments(digest,node_id,revision,status,updated) '
+                                   "VALUES ('digest','offline-worker',1,?,0)", (state,))
+                    result = hub.update_status(stop=True)
+                    self.assertFalse(result['ready_for_update'])
+                    self.assertEqual(result['pending_projects'], 1)
+                    self.assertFalse(hub.updating)
+            with hub.transaction():
+                hub.db.execute("UPDATE project_deployments SET status='installed'")
+                hub.db.execute("INSERT INTO uploads VALUES (?, 'digest', 1)", (job_id,))
+                hub.db.execute("INSERT INTO artifacts VALUES (?, 'result', 'digest', 1, 0)", (job_id,))
+                hub.db.execute("INSERT INTO project_uploads VALUES ('upload',1,'digest','digest')")
+            result = hub.update_status()
+            self.assertTrue(result['ready_for_update'])
+            self.assertEqual(result['pending_uploads'], 0)
+            self.assertEqual(result['pending_projects'], 0)
         finally:
             hub.close()
 
