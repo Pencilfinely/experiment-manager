@@ -2,6 +2,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -293,8 +294,27 @@ class WorkerServiceTests(unittest.TestCase):
         self.assertIn('KillMode=process', unit)
         self.assertIn('Restart=no', unit)
         self.assertNotIn(self.config['token'], unit)
+        settings = common.read_json(self.root / 'service.json')
+        self.assertIn('\nWorkingDirectory=' + settings['package_dir'].replace('%', '%%') + '\n', unit)
+        self.assertIn('\nStandardOutput=append:' + str(self.root / 'worker.log').replace('%', '%%') + '\n', unit)
+        self.assertIn('\nStandardError=append:' + str(self.root / 'worker.log').replace('%', '%%') + '\n', unit)
         self.assertEqual(calls[0], ['systemctl', '--user', 'daemon-reload'])
         self.assertTrue(all(call[0] != 'sudo' for call in calls))
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('systemd-analyze'),
+                         'Requires the real systemd unit parser')
+    def test_generated_service_passes_systemd_parser_with_special_path_characters(self):
+        root = self.folder / 'client with spaces 50% "quoted"'
+        with patch.object(service, '_require_linux'), patch.object(service.Path, 'home', return_value=self.home), \
+             patch.object(service, '_systemd_available', return_value=True), \
+             patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            service.install(root, config=str(self.config_path), backend='systemd', start_now=False)
+        unit = next((self.home / '.config/systemd/user').glob('*.service'))
+        result = subprocess.run(['systemd-analyze', 'verify', '--man=no', str(unit)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Failed to parse', result.stderr)
+        self.assertNotIn('not absolute', result.stderr)
 
     def test_pid_identity_checks_process_command_and_start_ticks(self):
         proc = self.folder / 'proc/123'
@@ -317,6 +337,26 @@ class WorkerServiceTests(unittest.TestCase):
         run.assert_called_once_with(self.root, str(self.config_path))
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(common.read_json(self.root / 'status.json')['status'], 'stopped')
+
+    def test_prepared_custom_daemon_is_restored_before_agent_starts(self):
+        self.config['setup_network'] = 'host'
+        common.atomic_json(self.config_path, self.config)
+        common.atomic_json(self.config_path.parent / 'setup-state.json',
+                           {'docker_endpoint': 'unix:///run/expman-docker.sock', 'setup_network': 'host'})
+        self.select()
+
+        def run(root, config_path):
+            self.assertEqual(os.environ['DOCKER_HOST'], 'unix:///run/expman-docker.sock')
+            self.assertNotIn('DOCKER_CONTEXT', os.environ)
+            self.assertEqual(common.read_json(config_path)['setup_network'], 'host')
+
+        with patch.dict(os.environ, {'DOCKER_CONTEXT': 'unrelated-context', 'DOCKER_HOST': 'unix:///var/run/docker.sock'}), \
+                patch.object(service, '_require_linux'), patch.object(service, '_process_identity', return_value='100'), \
+                patch.object(service.signal, 'signal'), patch.object(service, 'private_connection'), \
+                patch.object(service, '_run_agent', side_effect=run) as run_agent, \
+                patch('expman.worker_setup.start', side_effect=AssertionError('must reuse prepared config')):
+            self.assertEqual(service.serve(self.root), 0)
+        run_agent.assert_called_once_with(self.root, str(self.config_path))
 
     def test_worker_cli_refuses_controller_release_before_any_lifecycle_action(self):
         output = io.StringIO()

@@ -71,7 +71,10 @@ def validate_runtime(runtime):
 
 
 class _Docker:
-    def __init__(self, root):
+    def __init__(self, root, *, setup_network="bridge"):
+        if setup_network not in ("bridge", "host"):
+            raise ValueError("setup_network must be bridge or host")
+        self.setup_network = setup_network
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.log = self.root / "environment-setup.log"
@@ -143,14 +146,35 @@ class _Docker:
         name = "expman-harness-registry"
         code, output = self.command(["docker", "container", "inspect", name], check=False, timeout=20)
         if code:
+            network = (["--network", "host", "-e", "REGISTRY_HTTP_ADDR=127.0.0.1:5002"]
+                       if self.setup_network == "host" else ["-p", "127.0.0.1:5002:5000"])
             self.command(["docker", "run", "-d", "--name", name, "--restart", "unless-stopped",
-                          "--label", "expman.component=harness-registry", "-p", "127.0.0.1:5002:5000",
-                          "-v", "expman-harness-registry-data:/var/lib/registry", "-e", "OTEL_TRACES_EXPORTER=none", "registry:3"], timeout=600)
+                          "--label", "expman.component=harness-registry", *network,
+                          "-v", "expman-harness-registry-data:/var/lib/registry",
+                          "-e", "REGISTRY_HTTP_DEBUG_ADDR=", "-e", "OTEL_TRACES_EXPORTER=none", "registry:3"], timeout=600)
         else:
             item = json.loads(output)[0]
+            host = item.get("HostConfig", {})
+            if self.setup_network == "host":
+                addresses = [entry.partition("=")[2] for entry in (item.get("Config", {}).get("Env") or [])
+                             if isinstance(entry, str) and entry.startswith("REGISTRY_HTTP_ADDR=")]
+                debug_addresses = [entry for entry in (item.get("Config", {}).get("Env") or [])
+                                   if isinstance(entry, str) and entry.startswith("REGISTRY_HTTP_DEBUG_ADDR=")]
+                network_matches = (host.get("NetworkMode") == "host"
+                                   and addresses == ["127.0.0.1:5002"]
+                                   and debug_addresses == ["REGISTRY_HTTP_DEBUG_ADDR="]
+                                   and not host.get("PortBindings"))
+            else:
+                network_matches = (host.get("NetworkMode", "default") in ("default", "bridge")
+                                   and (host.get("PortBindings") or {}).get("5000/tcp") ==
+                                   [{"HostIp": "127.0.0.1", "HostPort": "5002"}])
             if (item.get("Config", {}).get("Labels", {}).get("expman.component") != "harness-registry"
-                    or item.get("HostConfig", {}).get("PortBindings", {}).get("5000/tcp") != [{"HostIp": "127.0.0.1", "HostPort": "5002"}]):
-                raise ValueError("An unrelated container owns the harness registry name; it was left unchanged")
+                    or not network_matches):
+                raise ValueError("An unrelated container or incompatible network/debug configuration owns the harness registry name; "
+                                 "it was left unchanged. Host registries require REGISTRY_HTTP_DEBUG_ADDR= (empty value); "
+                                 "recreate the owned container while preserving its data volume.")
+            if item.get("State", {}).get("Restarting"):
+                raise RuntimeError("Harness registry is restarting; inspect its container logs before retrying setup")
             if not item.get("State", {}).get("Running"):
                 self.command(["docker", "start", name])
         return "localhost:5002"
@@ -179,7 +203,8 @@ class _Docker:
             self.command(["docker", "image", "inspect", base], timeout=20)
         registry = self.registry(base, base_pulled=code == 0)
         tag = registry + "/expman-harness:" + key[:24]
-        self.command(["docker", "build", "--build-arg", "BASE_IMAGE=" + base, "--tag", tag, "."], cwd=build_root, timeout=7200)
+        network = ["--network", "host"] if self.setup_network == "host" else []
+        self.command(["docker", "build", *network, "--build-arg", "BASE_IMAGE=" + base, "--tag", tag, "."], cwd=build_root, timeout=7200)
         _, output = self.command(["docker", "push", tag], timeout=7200)
         digests = set(re.findall(r"\bdigest: (sha256:[0-9a-f]{64})\b", output))
         if len(digests) != 1:
@@ -214,7 +239,7 @@ def ensure_environment(runtime, node_config, storage_root):
     # Previously prepared dependencies are checked first so a repeated project
     # installation reuses them without rebuilding/pushing their base again.
     candidates.sort(key=lambda item: 0 if item[1].get("requirements") == runtime["requirements"] else 1)
-    docker = _Docker(Path(storage_root) / "environments")
+    docker = _Docker(Path(storage_root) / "environments", setup_network=config.get("setup_network", "bridge"))
     docker.local_endpoint()
     gpus = docker.inventory(config)
     environments, failures, checked_images, covered_gpus = [], [], set(), set()

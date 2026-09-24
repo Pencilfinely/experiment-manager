@@ -69,6 +69,9 @@ namespace ExperimentManagerDesktop {
             }
         }
         internal static string Run(string executable, params string[] args) {
+            return RunWithTimeout(120000,executable,args);
+        }
+        internal static string RunWithTimeout(int timeoutMs,string executable, params string[] args) {
             var info=new ProcessStartInfo(executable,Arguments(args)) { WorkingDirectory=Package, UseShellExecute=false, CreateNoWindow=true,
                 RedirectStandardOutput=true, RedirectStandardError=true, StandardOutputEncoding=Encoding.UTF8, StandardErrorEncoding=Encoding.UTF8 };
             if(Path.GetFileName(executable).Equals("wsl.exe",StringComparison.OrdinalIgnoreCase)&&Array.IndexOf(args,"--list")>=0) info.StandardOutputEncoding=Encoding.Unicode;
@@ -78,7 +81,7 @@ namespace ExperimentManagerDesktop {
                 p.OutputDataReceived += (s,e)=>{ if(e.Data!=null) lock(output) output.AppendLine(e.Data); };
                 p.ErrorDataReceived += (s,e)=>{ if(e.Data!=null) lock(error) error.AppendLine(e.Data); };
                 p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
-                if(!p.WaitForExit(120000)) throw new Exception("操作仍在执行，请稍后查看状态或日志。后台安装可能需要下载依赖。");
+                if(!p.WaitForExit(timeoutMs)) throw new Exception("操作仍在执行，请稍后查看状态或日志。后台安装可能需要下载依赖。");
                 p.WaitForExit();
                 string value=output.ToString().Replace("\0", "").Trim();
                 if(p.ExitCode!=0 && !value.StartsWith("{")) throw new Exception((value+"\n"+error.ToString()).Trim());
@@ -86,7 +89,10 @@ namespace ExperimentManagerDesktop {
             }
         }
         internal static Dictionary<string,object> Command(string executable, params string[] args) {
-            string text=Run(executable,args);
+            return CommandWithTimeout(120000,executable,args);
+        }
+        internal static Dictionary<string,object> CommandWithTimeout(int timeoutMs,string executable, params string[] args) {
+            string text=RunWithTimeout(timeoutMs,executable,args);
             var value=Json.Deserialize<Dictionary<string,object>>(text);
             if(Text(value,"status")=="error") throw new Exception(Text(value,"detail",text));
             return value;
@@ -352,6 +358,7 @@ namespace ExperimentManagerDesktop {
             var actions=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
             AddButton(actions,App.Worker?"启动后台代理":"打开实验台",()=> { if(App.Worker) StartWorker(); else OpenController(); });
             AddButton(actions,App.Worker?"停止代理":"停止主控",()=>Stop());
+            if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
@@ -483,18 +490,19 @@ namespace ExperimentManagerDesktop {
             Display(value);return value;
         }
         string SelectedDistribution {get{if(distro.SelectedItem==null)throw new Exception("选择原节点使用的 Ubuntu。");return Convert.ToString(distro.SelectedItem);}}
-        async Task<Dictionary<string,object>> WorkerCommand(string action) {
+        async Task<Dictionary<string,object>> WorkerCommand(string action,params string[] options) {
             string distribution=SelectedDistribution,credential=pairing.Text;
             string selected=existing.SelectedIndex>0?configs[existing.SelectedIndex]:"";
             return await Task.Run(()=> {
                 string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",App.Package).Trim();
                 var argv=new List<string>{"-d",distribution,"--exec","bash",package+"/Client-Worker.sh",action};
+                argv.AddRange(options);
                 if(action=="start"||action=="install") {
                     if(action=="install") {argv.Add("--backend");argv.Add("detached");}
                     if(!string.IsNullOrEmpty(selected)) {argv.Add("--config");argv.Add(selected);}
                     else if(!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
                 }
-                var result=App.Command("wsl.exe",argv.ToArray());
+                var result=App.CommandWithTimeout(action=="gpu-enable"?300000:120000,"wsl.exe",argv.ToArray());
                 if(action=="update-status")return result;
                 if(action!="stop"&&action!="stop-for-update"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing"||App.Text(result,"status")=="shutting_down")) {
                     if(heldDistribution!=distribution) {
@@ -508,6 +516,10 @@ namespace ExperimentManagerDesktop {
         }
         async void RefreshState(){await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
         async void StartWorker(){await Execute(async()=>{summary.Text="正在安装或复用算力代理…";Display(await WorkerCommand("install"));});}
+        async void OpenGpuSettings(){await Execute(async()=>{
+            using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
+            Display(await WorkerCommand("status"));
+        });}
         async void Stop(){await Execute(async()=>{Display(App.Worker?await WorkerCommand("stop"):await Controller("controller-stop"));});}
         async void OpenController(){await Execute(async()=>{var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
         void Display(Dictionary<string,object> value) {

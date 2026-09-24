@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'deploy/desktop/ExperimentApp.cs'
 VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
 EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/desktop/DesktopUpdateForm.cs',
-                 ROOT / 'deploy/desktop/DesktopIcons.cs', ROOT / 'deploy/desktop/BrowserAppWindow.cs')
+                 ROOT / 'deploy/desktop/DesktopIcons.cs', ROOT / 'deploy/desktop/BrowserAppWindow.cs',
+                 ROOT / 'deploy/desktop/WorkerGpuForm.cs')
 MANIFEST = ROOT / 'deploy/desktop/app.manifest'
 ICONS = {'controller': ROOT / 'assets/center.ico', 'worker': ROOT / 'assets/worker.ico'}
 REFERENCES = ('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll',

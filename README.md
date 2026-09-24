@@ -5,8 +5,8 @@
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Current version: 0.4.3.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. New projects allow GPU sharing by default. Edit existing node concurrency and budgets from the compute page, and override resources for individual experiments or matrices. See the [release notes](docs/RELEASE-0.4.3.md). Updates start when you request them.
+**Current version: 0.4.4.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. Open GPU settings in Experiment Worker to verify and enable a previously disabled card. Edit node concurrency and budgets from the compute page, and override resources for individual experiments or matrices. See the [release notes](docs/RELEASE-0.4.4.md). Updates start when you request them.
 
 ## Download and install
 

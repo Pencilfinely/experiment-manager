@@ -743,6 +743,16 @@ def _quoted_unit(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
 
 
+def _unit_path(value):
+    # WorkingDirectory and append: destinations do not unquote/unescape their
+    # values like ExecStart and Environment do. Only specifiers need escaping.
+    value = str(value)
+    if (any(char in value for char in ('\n', '\r', '\0')) or
+            value.endswith('\\') or value != value.rstrip()):
+        raise ValueError('Invalid systemd path')
+    return value.replace('%', '%%')
+
+
 def _installation_payload():
     package = Path(__file__).resolve().parent
     entries = [(path.relative_to(package), path.read_bytes()) for path in sorted(package.rglob('*'))
@@ -817,13 +827,13 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
             unit_dir.mkdir(parents=True, exist_ok=True)
             unit = unit_dir / _unit_name(root)
             unit.write_text('[Unit]\nDescription=Experiment Manager compute worker\n'
-                '\n[Service]\nType=simple\nWorkingDirectory=' + _quoted_unit(installed) +
+                '\n[Service]\nType=simple\nWorkingDirectory=' + _unit_path(installed) +
                 '\nEnvironment=' + _quoted_unit('PYTHONPATH=' + str(installed)) +
                 '\nEnvironment=PYTHONUNBUFFERED=1\nExecStart=' + _quoted_unit(sys.executable) +
                 ' -u -m expman.worker_service _serve --service-root ' + _quoted_unit(root) +
                 '\nKillMode=process\nTimeoutStopSec=20\nRestart=no\n'
-                'StandardOutput=' + _quoted_unit('append:' + str(root / 'worker.log')) +
-                '\nStandardError=' + _quoted_unit('append:' + str(root / 'worker.log')) +
+                'StandardOutput=append:' + _unit_path(root / 'worker.log') +
+                '\nStandardError=append:' + _unit_path(root / 'worker.log') +
                 '\n\n[Install]\nWantedBy=default.target\n', encoding='utf-8')
             for command in (['systemctl', '--user', 'daemon-reload'],
                             ['systemctl', '--user', 'enable', _unit_name(root)]):
@@ -852,7 +862,8 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
-                                         'update-status', 'stop-for-update', 'install-status', 'shutdown'))
+                                         'update-status', 'stop-for-update', 'install-status', 'shutdown',
+                                         'gpu-status', 'gpu-enable'))
     parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')
     parser.add_argument('--root', help='Worker data directory; separate from lifecycle settings')
@@ -861,6 +872,7 @@ def main(argv=None):
     parser.add_argument('--backend', choices=('auto', 'systemd', 'detached'), default='auto')
     parser.add_argument('--no-start', action='store_true')
     parser.add_argument('--lines', type=int, default=80)
+    parser.add_argument('--gpu', help='GPU UUID to verify and enable from local settings')
     args = parser.parse_args(argv)
     try:
         _check_release_role()
@@ -873,6 +885,10 @@ def main(argv=None):
             if args.action == 'install':
                 options.update(backend=args.backend, start_now=not args.no_start)
             value = globals()[args.action](args.service_root, **options)
+        elif args.action in ('gpu-status', 'gpu-enable'):
+            from .worker_gpu import gpu_status, gpu_enable
+            value = (gpu_enable(args.service_root, gpu=args.gpu) if args.action == 'gpu-enable'
+                     else gpu_status(args.service_root))
         elif args.action == 'logs':
             value = logs(args.service_root, args.lines)
         else:

@@ -101,7 +101,7 @@ class ProjectDelivery:
                     if common.read_json(self.agent.config_path) != operation["before"]:
                         raise ValueError("Node configuration changed during installation; retry delivery")
                     updated = operation["result"]["config"]
-                    for key in ("node_id", "token", "hub_url", "root", "policy", "gpu_policy"):
+                    for key in ("node_id", "token", "hub_url", "root", "policy", "gpu_policy", "setup_network"):
                         if updated.get(key) != operation["before"].get(key):
                             raise ValueError("Project attempted to change node identity or runtime policy")
                     for key in ("profiles", "assets"):

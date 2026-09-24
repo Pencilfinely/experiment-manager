@@ -91,6 +91,118 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(any(argv[:2] == ["docker", "push"] for argv, _ in calls))
         self.assertIn((["docker", "pull", DERIVED], {"timeout": 7200}), calls)
         self.assertFalse(any(argv[:3] == ["docker", "container", "inspect"] for argv, _ in calls))
+        builds = [argv for argv, _ in calls if argv[:2] == ["docker", "build"]]
+        self.assertEqual(len(builds), 1)
+        self.assertNotIn("--network", builds[0])
+
+    def test_host_setup_builds_on_host_but_verifies_without_network(self):
+        config = self.config()
+        config["setup_network"] = "host"
+        original = copy.deepcopy(config)
+        calls = []
+        runtime = {"imports": ["scipy"], "requirements": ["scipy==1.15.3", "tqdm==4.67.1"]}
+        with temporary_directory() as temporary, patch.object(_Docker, "command", autospec=True,
+                side_effect=self.fake(calls, missing=True, pulled=False)):
+            result = ensure_environment(runtime, config, Path(temporary))
+        self.assertEqual(config, original)
+        self.assertEqual(result["config"]["setup_network"], "host")
+        self.assertTrue(result["environments"][0]["image"].startswith("localhost:5002/"))
+        starts = [argv for argv, _ in calls if argv[:3] == ["docker", "run", "-d"]]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0][starts[0].index("--network") + 1], "host")
+        self.assertIn("REGISTRY_HTTP_ADDR=127.0.0.1:5002", starts[0])
+        self.assertIn("REGISTRY_HTTP_DEBUG_ADDR=", starts[0])
+        self.assertIn("expman.component=harness-registry", starts[0])
+        self.assertNotIn("-p", starts[0])
+        builds = [argv for argv, _ in calls if argv[:2] == ["docker", "build"]]
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(builds[0][builds[0].index("--network") + 1], "host")
+        checks = [argv for argv, _ in calls if "--entrypoint" in argv]
+        self.assertTrue(any("--gpus" in argv for argv in checks))
+        self.assertTrue(all(argv[argv.index("--network") + 1] == "none" for argv in checks))
+
+    def test_unknown_setup_network_is_rejected_before_docker_commands(self):
+        for mode in (None, "", "none", "bridge; echo unsafe", ["host"]):
+            with self.subTest(mode=mode), temporary_directory() as temporary, patch.object(_Docker, "command") as command:
+                config = self.config()
+                config["setup_network"] = mode
+                with self.assertRaisesRegex(ValueError, "setup_network must be bridge or host"):
+                    ensure_environment({}, config, temporary)
+                command.assert_not_called()
+
+    def test_existing_host_registry_is_reused_or_started(self):
+        for running in (True, False):
+            existing = {"Config": {"Labels": {"expman.component": "harness-registry"},
+                                   "Env": ["REGISTRY_HTTP_ADDR=127.0.0.1:5002", "REGISTRY_HTTP_DEBUG_ADDR=", "OTEL_TRACES_EXPORTER=none"]},
+                        "HostConfig": {"NetworkMode": "host", "PortBindings": None},
+                        "State": {"Running": running}}
+            calls = []
+            with self.subTest(running=running), temporary_directory() as temporary, \
+                    patch.object(_Docker, "command", autospec=True, side_effect=self.fake(calls, existing_registry=existing)):
+                docker = _Docker(temporary, setup_network="host")
+                self.assertEqual(docker.registry(BASE, base_pulled=False), "localhost:5002")
+            self.assertEqual([argv for argv, _ in calls],
+                             [["docker", "container", "inspect", "expman-harness-registry"]] +
+                             ([] if running else [["docker", "start", "expman-harness-registry"]]))
+
+    def test_bridge_registry_accepts_default_and_legacy_network_metadata(self):
+        for mode in (None, "default", "bridge"):
+            existing = {"Config": {"Labels": {"expman.component": "harness-registry"}},
+                        "HostConfig": {"PortBindings": {"5000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5002"}]}},
+                        "State": {"Running": True}}
+            if mode is not None:
+                existing["HostConfig"]["NetworkMode"] = mode
+            calls = []
+            with self.subTest(mode=mode), temporary_directory() as temporary, \
+                    patch.object(_Docker, "command", autospec=True, side_effect=self.fake(calls, existing_registry=existing)):
+                self.assertEqual(_Docker(temporary).registry(BASE, base_pulled=False), "localhost:5002")
+            self.assertEqual([argv for argv, _ in calls], [["docker", "container", "inspect", "expman-harness-registry"]])
+
+    def test_registry_network_conflicts_are_rejected_without_mutation(self):
+        expected = {"Config": {"Labels": {"expman.component": "harness-registry"},
+                               "Env": ["REGISTRY_HTTP_ADDR=127.0.0.1:5002", "REGISTRY_HTTP_DEBUG_ADDR="]},
+                    "HostConfig": {"NetworkMode": "host"}, "State": {"Running": False}}
+        conflicts = []
+        for debug in ([], ["REGISTRY_HTTP_DEBUG_ADDR=:5001"],
+                      ["REGISTRY_HTTP_DEBUG_ADDR=127.0.0.1:5003"],
+                      ["REGISTRY_HTTP_DEBUG_ADDR=", "REGISTRY_HTTP_DEBUG_ADDR=:5001"]):
+            item = copy.deepcopy(expected)
+            item["Config"]["Env"] = ["REGISTRY_HTTP_ADDR=127.0.0.1:5002", *debug]
+            conflicts.append(("host", item))
+        for addresses in (None, [], ["REGISTRY_HTTP_ADDR=0.0.0.0:5002"],
+                          ["REGISTRY_HTTP_ADDR=127.0.0.1:5001"],
+                          ["REGISTRY_HTTP_ADDR=127.0.0.1:5002", "REGISTRY_HTTP_ADDR=0.0.0.0:5002"]):
+            item = copy.deepcopy(expected)
+            item["Config"]["Env"] = addresses
+            conflicts.append(("host", item))
+        for mode in ("bridge", "default", "none"):
+            item = copy.deepcopy(expected)
+            item["HostConfig"]["NetworkMode"] = mode
+            conflicts.append(("host", item))
+        item = copy.deepcopy(expected)
+        item["HostConfig"]["PortBindings"] = {"5000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5002"}]}
+        conflicts.extend([("host", item), ("bridge", item)])
+        item = copy.deepcopy(expected)
+        item["Config"]["Labels"] = {}
+        conflicts.append(("host", item))
+        for mode, existing in conflicts:
+            calls = []
+            with self.subTest(mode=mode, existing=existing), temporary_directory() as temporary, \
+                    patch.object(_Docker, "command", autospec=True, side_effect=self.fake(calls, existing_registry=existing)):
+                with self.assertRaisesRegex(ValueError, "left unchanged"):
+                    _Docker(temporary, setup_network=mode).registry(BASE, base_pulled=False)
+            self.assertEqual([argv for argv, _ in calls], [["docker", "container", "inspect", "expman-harness-registry"]])
+
+    def test_restarting_registry_is_rejected_before_building(self):
+        existing = {"Config": {"Labels": {"expman.component": "harness-registry"},
+                               "Env": ["REGISTRY_HTTP_ADDR=127.0.0.1:5002", "REGISTRY_HTTP_DEBUG_ADDR="]},
+                    "HostConfig": {"NetworkMode": "host"}, "State": {"Running": True, "Restarting": True}}
+        calls = []
+        with temporary_directory() as temporary, \
+                patch.object(_Docker, "command", autospec=True, side_effect=self.fake(calls, existing_registry=existing)):
+            with self.assertRaisesRegex(RuntimeError, "restarting"):
+                _Docker(temporary, setup_network="host").registry(BASE, base_pulled=False)
+        self.assertEqual([argv for argv, _ in calls], [["docker", "container", "inspect", "expman-harness-registry"]])
 
     def test_failed_cuda_check_never_changes_input_config_or_returns_environment(self):
         config = self.config()

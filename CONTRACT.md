@@ -76,6 +76,8 @@ The controller exports a per-worker pairing file. The Linux/WSL worker launcher 
 
 Node snapshots may include task_templates: up to 100 validated task specifications. They are admin-visible suggestions; selecting one fills the browser editor and never submits a job automatically. The project wizard registers a clean, committed local Git repository and optional dataset path without modifying the algorithm.
 
+The worker desktop exposes local GPU settings through `worker_service gpu-status` and `gpu-enable --gpu UUID`. Enabling is explicit and uses existing matching pinned runtimes; every distinct matching image must pass actual CUDA UUID and calculation checks. Pending experiments, uploads, or a busy preparation prevent the operation. An idle managed agent can stop at a durable boundary and resume after success or failure. Configuration is backed up before changing the selected GPU's local admission; other GPUs, node identity, projects and resource budgets are retained. Remote resource policies still cannot enable a locally disabled card. Updates preserve local GPU choices.
+
 ## SASRec external adapter and diagnostics (2026-09-12)
 
 Dedicated subprocess command: python -m expman.adapters.sasrec --project /workspace/code/SASRec_Original. It uses the existing Run environment. Flat params comprise the original _DEFAULTS plus dataset/data_asset/torch_threads; unknown params fail, device is explicit cpu or cuda and gpu_id=0. The Docker image embeds expman under /opt/experiment-manager; algorithm source comes from the pinned task Git commit.

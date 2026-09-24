@@ -266,7 +266,7 @@ function openNodeResources(id){
   for(const gpu of nodeResourceEditor.gpus){
     const section=node('div',undefined,'resource-gpu'),fields=node('div',undefined,'form-grid'),settings={...gpu,...desired.gpu_policy?.[gpu.uuid]};
     section.append(node('h4',gpu.name),node('p',gpu.uuid,'resource-uuid'));
-    if(gpu.local_enabled!==true)section.append(node('p','此卡未在算力端启用或未通过环境验证。请在该机器重新检查并启用后再配置。','muted'));
+    if(gpu.local_enabled!==true)section.append(node('p','此卡未在算力端启用或缺少匹配的已验证环境。请在该机器打开 Experiment Worker → 显卡设置 → 检查并启用所选显卡；没有此入口时先更新算力端。','muted'));
     else{nodeResourceEditor.inputs.gpu_policy[gpu.uuid]=objectFields(fields,{max_jobs:settings.max_jobs??1,reserve_mb:settings.reserve_mb??2048},()=>{},
       {max_jobs:{type:'integer',min:0,max:256,description:'允许同卡运行多个实验时填 2 或更高；0 暂停在此卡启动新实验。'},reserve_mb:{type:'integer',min:0,max:gpu.total_mb,description:'从实时空闲显存中额外扣除，给波动留出余量。'}},
       {max_jobs:'此卡并发上限',reserve_mb:'显存预留 (MiB)'});section.append(fields);}

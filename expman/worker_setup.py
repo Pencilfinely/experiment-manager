@@ -79,7 +79,7 @@ def authenticate(pairing):
 
 
 class WorkerSetup:
-    def __init__(self, root, pairing, *, cancel_requested=None):
+    def __init__(self, root, pairing, *, cancel_requested=None, setup_network=None):
         self.cancel_requested = cancel_requested
         self.root = Path(root).expanduser().resolve()
         if ',' in str(self.root):
@@ -90,6 +90,13 @@ class WorkerSetup:
         if self.state and self.state.get('node_id') != self.pairing['node_id']:
             raise ValueError('This data directory belongs to another worker')
         self.state['node_id'] = self.pairing['node_id']
+        if setup_network is None:
+            setup_network = self.state.get('setup_network',
+                read_json(self.root / 'node.ready.json', {}).get('setup_network', 'bridge'))
+        if setup_network not in ('bridge', 'host'):
+            raise ValueError('setup_network must be bridge or host')
+        self.setup_network = setup_network
+        self.state['setup_network'] = setup_network
         self.log_path = self.root / 'setup.log'
         self.endpoint = None
 
@@ -251,6 +258,8 @@ class WorkerSetup:
         context = os.environ.get('DOCKER_CONTEXT')
         if os.environ.get('DOCKER_HOST') and not context:
             endpoint = os.environ['DOCKER_HOST']
+        elif not context and self.state.get('docker_endpoint'):
+            endpoint = self.state['docker_endpoint']
         else:
             argv = ['docker', 'context', 'inspect'] + ([context] if context else [])
             _, endpoint = self.command(argv + ['--format', '{{.Endpoints.docker.Host}}'], timeout=10)
@@ -329,16 +338,38 @@ class WorkerSetup:
         registry = 'expman-worker-registry'
         code, output = self.command(['docker', 'container', 'inspect', registry], check=False)
         if code:
+            network = (['--network', 'host', '-e', 'REGISTRY_HTTP_ADDR=127.0.0.1:5001']
+                       if self.setup_network == 'host' else ['-p', '127.0.0.1:5001:5000'])
             self.command(['docker', 'run', '-d', '--name', registry, '--restart', 'unless-stopped',
-                          '--label', 'expman.component=worker-registry', '-p', '127.0.0.1:5001:5000',
+                          '--label', 'expman.component=worker-registry', *network,
                           '-v', 'expman-worker-registry-data:/var/lib/registry',
+                          # Registry 3 may enable a debug listener on :5001 by default.
+                          '-e', 'REGISTRY_HTTP_DEBUG_ADDR=',
                           '-e', 'OTEL_TRACES_EXPORTER=none', REGISTRY_IMAGE],
                          progress=True)
         else:
             item = json.loads(output)[0]
+            host_config = item['HostConfig']
+            mode = host_config.get('NetworkMode', 'default')
+            if self.setup_network == 'host':
+                addresses = [value for value in (item['Config'].get('Env') or [])
+                             if isinstance(value, str) and value.startswith('REGISTRY_HTTP_ADDR=')]
+                debug_addresses = [value for value in (item['Config'].get('Env') or [])
+                                   if isinstance(value, str) and value.startswith('REGISTRY_HTTP_DEBUG_ADDR=')]
+                expected_network = (mode == 'host' and addresses == ['REGISTRY_HTTP_ADDR=127.0.0.1:5001']
+                                    and debug_addresses == ['REGISTRY_HTTP_DEBUG_ADDR=']
+                                    and not host_config.get('PortBindings'))
+            else:
+                expected_network = (mode in ('default', 'bridge') and
+                                    (host_config.get('PortBindings') or {}).get('5000/tcp') ==
+                                    [{'HostIp': '127.0.0.1', 'HostPort': '5001'}])
             if (item['Config'].get('Labels', {}).get('expman.component') != 'worker-registry'
-                    or item['HostConfig'].get('PortBindings', {}).get('5000/tcp') != [{'HostIp': '127.0.0.1', 'HostPort': '5001'}]):
-                raise ValueError('An unrelated container uses the worker registry name; it was left unchanged')
+                    or not expected_network):
+                raise ValueError('Worker registry ownership or network/debug configuration does not match; '
+                                 'container was left unchanged. Host registries require REGISTRY_HTTP_DEBUG_ADDR= '
+                                 '(empty value); recreate the owned container while preserving its data volume.')
+            if item['State'].get('Restarting'):
+                raise RuntimeError('Worker registry is restarting; inspect its container logs before retrying setup')
             if not item['State']['Running']:
                 self.command(['docker', 'start', registry])
         cache = self.state.get('image', {})
@@ -352,7 +383,8 @@ class WorkerSetup:
         print('  [3.2] Downloading PyTorch base image / 下载 PyTorch 基础镜像', flush=True)
         self.command(['docker', 'pull', BASE_IMAGE], timeout=7200, progress=True)
         print('  [3.3] Building worker runtime / 构建算力端运行环境', flush=True)
-        self.command(['docker', 'build', '--progress=plain', '--build-arg', 'BASE_IMAGE=' + BASE_IMAGE, '-t', tag, '.'],
+        network = ['--network', 'host'] if self.setup_network == 'host' else []
+        self.command(['docker', 'build', *network, '--progress=plain', '--build-arg', 'BASE_IMAGE=' + BASE_IMAGE, '-t', tag, '.'],
                      cwd=self.build_root, timeout=7200, progress=True)
         print('  [3.4] Publishing to local registry / 将运行环境写入本机镜像仓库', flush=True)
         _, output = self.command(['docker', 'push', tag], timeout=7200, progress=True)
@@ -390,7 +422,7 @@ class WorkerSetup:
         available_ram = _free_ram_mb()
         if available_ram is None or available_ram < 2048:
             raise ValueError('At least 2 GiB available system RAM is required')
-        config.update(allowed_repos=[str(self.repo)], tags=[self.pairing['node_id']],
+        config.update(allowed_repos=[str(self.repo)], tags=[self.pairing['node_id']], setup_network=self.setup_network,
             profiles={profile: {'image': image, 'verified': True, 'gpu_name_patterns': sorted({g['name'] for g in selected})}},
             gpu_policy={g['uuid']: {'max_jobs': 4 if g in selected else 0, 'reserve_mb': 1024} for g in self.gpus})
         # Concurrency is an upper bound, not a reservation. Each start still
@@ -456,6 +488,9 @@ def start(args, cancel_requested=None):
         current = read_json(config_path)
         if current and (current.get('node_id') != pairing['node_id'] or current.get('token') != pairing['token']):
             raise ValueError('Configuration and pairing do not match')
+        setup_network = getattr(args, 'setup_network', None)
+        if current and setup_network is not None and setup_network != current.get('setup_network', 'bridge') and not args.configure:
+            raise ValueError('Changing setup network requires --configure / 修改准备网络需要 --configure')
         # Updating the worker software does not invalidate its enrolled GPU
         # runtime or authorize replacing the user's GPU/resource preferences.
         # Project bundles carry their own harness; dependency preparation checks
@@ -463,7 +498,9 @@ def start(args, cancel_requested=None):
         if not current or args.configure or args.gpu:
             # The agent lock prevents changes while an existing worker owns this runtime.
             with InstanceLock(root / 'runtime' / 'agent.lock'):
-                setup = WorkerSetup(root, pairing, cancel_requested=cancel_requested)
+                setup = WorkerSetup(root, pairing, cancel_requested=cancel_requested, setup_network=setup_network)
+                # Keep the network choice even when preparation is interrupted.
+                setup.save()
                 setup.prerequisites()
                 _check_cancel(cancel_requested)
                 selected = [g for g in setup.gpus if not args.gpu or g['uuid'] in args.gpu]

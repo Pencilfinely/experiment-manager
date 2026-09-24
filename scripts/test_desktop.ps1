@@ -29,7 +29,7 @@ $testRoot = Join-Path $runtimeRoot ('desktop-tests-' + [Guid]::NewGuid().ToStrin
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
-Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -61,6 +61,54 @@ public static class DesktopWorkerInstallTest {
         method.Invoke(null,new object[]{"/tmp/unpaired desktop package","0.4.0",stopped,unexpected});
     }
 }
+public static class DesktopGpuSettingsTest {
+    public static void Verify(System.Type formType, string screenshot) {
+        var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+        const string target="GPU-738c5e76-1914-9b77-77df-7a57a48b996c";
+        bool enabled=false;int mutations=0;
+        Func<string,string[],System.Threading.Tasks.Task<System.Collections.Generic.Dictionary<string,object>>> command=(action,options)=> {
+            if(action=="gpu-enable") {
+                if(options.Length!=2||options[0]!="--gpu"||options[1]!=target)throw new Exception("GPU settings selected the wrong UUID");
+                mutations++;
+                if(mutations==1)return System.Threading.Tasks.Task.FromResult(new System.Collections.Generic.Dictionary<string,object>{{"status","failed"},{"detail","CUDA check failed; original configuration preserved."}});
+                enabled=true;
+                return System.Threading.Tasks.Task.FromResult(new System.Collections.Generic.Dictionary<string,object>{{"status","succeeded"},{"detail","GPU verified and enabled."}});
+            }
+            if(action!="gpu-status")throw new Exception("Unexpected GPU settings command: "+action);
+            object[] cards={
+                new System.Collections.Generic.Dictionary<string,object>{{"uuid","GPU-5647b081-f9d7-1019-0a1d-a026a2a4da30"},{"name","NVIDIA GeForce RTX 2080 Ti"},{"reason","\u5df2\u542f\u7528"},{"local_enabled",true},{"can_enable",true}},
+                new System.Collections.Generic.Dictionary<string,object>{{"uuid",target},{"name","NVIDIA GeForce RTX 2080 Ti"},{"reason",enabled?"\u5df2\u542f\u7528":"\u672c\u5730\u672a\u542f\u7528"},{"local_enabled",enabled},{"can_enable",true}}
+            };
+            return System.Threading.Tasks.Task.FromResult(new System.Collections.Generic.Dictionary<string,object>{{"gpus",cards}});
+        };
+        using(var form=(System.Windows.Forms.Form)System.Activator.CreateInstance(formType,flags,null,new object[]{command},null)) {
+            form.ShowInTaskbar=false;form.StartPosition=System.Windows.Forms.FormStartPosition.Manual;
+            form.Location=new System.Drawing.Point(-20000,-20000);form.Show();
+            System.Windows.Forms.Application.DoEvents();
+            var handle=form.Handle;
+            var cards=(System.Windows.Forms.ListView)formType.GetField("cards",flags).GetValue(form);
+            var cardHandle=cards.Handle;
+            ((System.Threading.Tasks.Task)formType.GetMethod("LoadCards",flags).Invoke(form,null)).GetAwaiter().GetResult();
+            if(cards.Items.Count!=2)throw new Exception("GPU settings inventory did not render both cards");
+            cards.Items[0].Selected=false;cards.Items[1].Selected=true;
+            formType.GetMethod("UpdateSelection",flags).Invoke(form,null);
+            var button=(System.Windows.Forms.Button)formType.GetField("enable",flags).GetValue(form);
+            if(!button.Enabled)throw new Exception("Disabled GPU cannot be enabled from settings");
+            form.PerformLayout();
+            if(cards.Width<form.ClientSize.Width*0.8||cards.Height<100)throw new Exception("GPU settings layout is collapsed");
+            using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)) {
+                form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));
+                bitmap.Save(screenshot,System.Drawing.Imaging.ImageFormat.Png);
+            }
+            ((System.Threading.Tasks.Task)formType.GetMethod("EnableSelected",flags).Invoke(form,null)).GetAwaiter().GetResult();
+            if(mutations!=1||!button.Enabled)throw new Exception("GPU settings cannot retry a failed check");
+            ((System.Threading.Tasks.Task)formType.GetMethod("EnableSelected",flags).Invoke(form,null)).GetAwaiter().GetResult();
+            if(mutations!=2||button.Enabled||cards.Items[1].SubItems[2].Text!="\u5df2\u542f\u7528")throw new Exception("GPU settings did not refresh after enabling");
+            ((System.Threading.Tasks.Task)formType.GetMethod("EnableSelected",flags).Invoke(form,null)).GetAwaiter().GetResult();
+            if(mutations!=2)throw new Exception("GPU settings re-enabled an already enabled card");
+        }
+    }
+}
 '@
 
 function Invoke-AppMethod($Method, [object[]]$Values) {
@@ -83,6 +131,11 @@ try {
         # by reflection; command transport and icon loading are exercised directly.
         $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($executable))
         $app = $assembly.GetType('ExperimentManagerDesktop.App', $true)
+        if ($role -eq 'worker') {
+            [DesktopGpuSettingsTest]::Verify($assembly.GetType('ExperimentManagerDesktop.WorkerGpuForm', $true),
+                (Join-Path $runtimeRoot 'gpu-settings-preview.png'))
+            Write-Output 'PASS worker GPU settings: correct UUID action, refreshed local state, duplicate-action prevention, rendered window.'
+        }
         $flags = [Reflection.BindingFlags]'NonPublic,Static'
         $installer = $assembly.GetType('ExperimentManagerDesktop.InstallerForm', $true)
         $completeWorker = $installer.GetMethod('CompleteWorkerInstallation', $flags)

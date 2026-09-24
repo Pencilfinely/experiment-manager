@@ -2,7 +2,13 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.md)
 
-This guide covers the **0.3.0-rc.5 desktop preview**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+This guide covers the **0.4.4 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+
+## Enable a previously disabled GPU
+
+On the compute machine, open **Experiment Worker → 显卡设置 (GPU settings)**, select the GPU by UUID, and click **检查并启用所选显卡 (Check and enable selected GPU)**. Update the worker to 0.4.4 or newer if this control is missing. The check uses existing pinned training images and validates the actual CUDA UUID and a matrix calculation. All matching environments must pass before the original configuration is backed up and the card is enabled. Other cards, projects and node resource budgets are preserved.
+
+Wait for local experiments, queued work and uploads to finish first. An idle running agent stops and resumes automatically after either success or a failed check; an agent that was already stopped remains stopped. Failures leave the GPU disabled and show their cause. A GPU with no matching verified runtime needs environment preparation first. After reconnecting, reload resource settings in the controller and check node concurrency, CPU and RAM budgets before running multiple experiments. Installing an update alone continues to preserve the user's GPU selection.
 
 ## Open, close a window, or stop a service
 

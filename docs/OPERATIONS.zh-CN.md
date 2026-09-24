@@ -2,7 +2,7 @@
 
 [English](OPERATIONS.md) · [返回安装说明](../README.zh-CN.md)
 
-本说明适用于 **0.3.0-rc.5 桌面预览版**。日常操作从 Experiment Center 和 Experiment Worker 进入；旧版终端入口保留作兼容和诊断用途。
+本说明适用于 **0.4.4 桌面版**。日常操作从 Experiment Center 和 Experiment Worker 进入；旧版终端入口保留作兼容和诊断用途。
 
 ## 打开、关窗口和停止运行
 
@@ -76,11 +76,47 @@ Ubuntu 算力端在安装包目录使用：
 已有配置在升级后保留，原先上限为 1 的节点可通过表单调高。新版离线节点可先保存设置，重连确认后显示已生效；降低上限不会中断当前实验。远程资源设置要求管理端和算力端均为 0.4.3 或更新版本。
 多卡合跑一个实验及自动选择最快分配尚未实现；不要把剩余显存当成剩余算力。
 
+若某张卡提示“未在算力端启用”，在该机器打开 **Experiment Worker → 显卡设置**，选择对应 UUID，点击 **检查并启用所选显卡**。此入口从 0.4.4 起提供，旧版请先更新算力端。检查使用现有训练镜像，验证 CUDA 实际选中的 UUID 与计算结果；全部匹配环境通过后，备份原配置并将该卡启用，其他卡、项目和节点资源预算保持原值。更新软件本身仍保留原来的显卡选择。
+
+检查前请等待本机实验、待执行任务和回传完成。运行中的空闲代理会自动停止，并在成功或检查失败后恢复；原本停止的代理保持停止。页面显示失败原因，检查失败不会启用该卡。若提示没有匹配的运行环境，需要先完成环境准备。启用后等待节点重连，在实验台“重新载入设置”；要同时使用多卡，还需确认节点并发及 CPU、内存预算足够。
+
 配对地址必须从算力机可达；远程机器的 localhost 指向它自己。管理端换 IP/端口后，需要更新对应连接信息。
 若 Windows 防火墙阻止节点，可使用管理包的 **Allow-Worker-Connections.cmd**，为指定节点 IP 放行已保存的管理端端口；它需要管理员权限，不会替你改校园网或 VPN 路由。
 
 主控暂时离线时，节点可继续已经分配、且代码/数据/镜像已准备好的任务。节点重连后补传记录与文件。
 节点失联不会自动导致同一个实验被重复派到另一台机器。
+
+### Ubuntu 使用专用 Docker 实例
+
+源码新增的 `Start-Worker.sh --setup-network host` 选项适用于已经配置并验收好的专用 Docker 实例，例如将本项目的镜像与卷保存到 `/data`。此选项尚不在原始 0.4.3 发布包中；需要包含本次改动的安装包。
+
+专用实例需要独立的 socket、数据目录、运行状态目录、PID 文件和配置文件，以及自己的 NVIDIA runtime 配置。Docker 28.5.1 还可能自动连接系统 containerd，因此要显式指定独立 containerd 的地址和存储。它仍与其他程序共享 CPU、GPU、磁盘和外网带宽，不构成资源隔离。安装脚本不会创建该实例或迁移原 Docker 数据。
+
+**共享服务器不能直接照搬 `bridge=none` 的多实例示例。** Docker 28.5.1 在这一启动分支会按名称删除 `docker0`，关闭 iptables 管理或分开存储目录也不能阻止该行为。`dockerd --validate` 只校验配置，不证明实际启动不会影响其他实例。需要先审查现有接口、路由和容器网段，再配置独有名称的网桥，或另行验证完整的网络命名空间隔离方案；同机多 daemon 仍属于 Docker 标注的实验性用法。参见[对应版本的网络初始化源码](https://github.com/moby/moby/blob/v28.5.1/daemon/daemon_unix.go#L817-L845)。
+
+实例准备好后，使用普通 Linux 用户先前台准备，再安装已验证的配置。以下路径为示例：
+
+```bash
+env -u DOCKER_CONTEXT DOCKER_HOST=unix:///run/expman-docker.sock \
+  bash Start-Worker.sh \
+    --root /data/experiment-manager-a6000/worker \
+    --pairing /data/experiment-manager-a6000/downloads/a6000.pairing.json \
+    --setup-network host --prepare-only
+```
+
+上一步成功生成 `node.ready.json` 后再运行：
+
+```bash
+bash Install-Worker.sh \
+  --service-root /data/experiment-manager-a6000/client \
+  --config /data/experiment-manager-a6000/worker/node.ready.json
+```
+
+准备阶段将 Docker 地址保存在 `setup-state.json`，后台服务加载该配置时恢复地址。首次后台安装尚不提供专用实例的选择界面，因此必须先完成前台准备。配置和配对文件应保存在私人目录，不要公开凭证。
+
+`host` 选项仅用于镜像准备：镜像仓库分别只监听 `127.0.0.1:5001`、`127.0.0.1:5002`；依赖安装的构建进程使用宿主网络，因此可以访问宿主的网络服务。GPU 验收和训练仍使用 `--network none`。此选项保存到节点配置，之后分发项目时继续沿用；省略时沿用已保存的选择，新安装默认仍为 bridge。已有同名仓库的网络配置不匹配时会报错并保留原容器。
+
+仓库容器显式设置 `REGISTRY_HTTP_DEBUG_ADDR=`（保留等号，值为空），关闭 Registry 镜像可能默认启用的 `:5001` 调试监听，避免与 Worker 仓库或另一仓库抢占宿主端口。旧版 host 模式仓库缺少此设置时，需停止并备份旧容器，以同一数据卷和该空值环境变量重新创建；不要删除仓库数据卷或重启共享 Docker。安装器会拒绝复用缺少此设置的 host 模式仓库，并在发现容器处于重启循环时提前报错。
 
 ## 升级、备份与卸载
 

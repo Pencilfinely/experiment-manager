@@ -131,6 +131,8 @@ def main():
     worker.add_argument('--root')
     worker.add_argument('--gpu', action='append')
     worker.add_argument('--prepare-only', action='store_true')
+    worker.add_argument('--setup-network', choices=('bridge', 'host'),
+                        help='Registry/build network during setup; host supports a dedicated Docker daemon without a bridge')
     worker.add_argument('--configure', action='store_true', help='Recheck GPUs and regenerate setup before starting')
     args = parser.parse_args()
     release = read_json(Path(__file__).resolve().parents[1] / 'release-role.json')

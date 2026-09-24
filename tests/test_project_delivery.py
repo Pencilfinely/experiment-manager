@@ -193,6 +193,25 @@ class ProjectDeliveryTests(unittest.TestCase):
         self.assertEqual(agent.project_delivery.reports()[0]["status"], "failed")
         self.assertEqual(common.read_json(agent.config_path), edited)
 
+    def test_project_cannot_enable_host_setup_network(self):
+        self.upload()
+        self.deploy()
+        agent = self.create_agent()
+        original = copy.deepcopy(agent.config)
+
+        def install(path, root, config):
+            result = self.install(path, root, config)
+            result['config']['setup_network'] = 'host'
+            return result
+
+        self.module.install_bundle = install
+        agent._sync(self.snapshot)
+        agent.project_delivery.tick()
+        agent.project_delivery.installing['thread'].join(3)
+        agent.project_delivery.tick()
+        self.assertEqual(agent.project_delivery.reports()[0]['status'], 'failed')
+        self.assertEqual(common.read_json(agent.config_path), original)
+
     def test_declared_no_resume_rejects_resume(self):
         job_id = self.hub.submit({"request_id": "no-resume", "spec": {"backend": "demo", "resume_supported": False}})["ids"][0]
         with self.assertRaises(APIError) as error:
