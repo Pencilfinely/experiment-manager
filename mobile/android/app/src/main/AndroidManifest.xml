@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Older Android versions safely ignore dataExtractionRules and enableOnBackInvokedCallback.
+         allowBackup/fullBackupContent and Activity.onBackPressed cover those versions. -->
+    <application android:label="@string/app_name" android:icon="@drawable/ic_monitor"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false" android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="true"
+        tools:ignore="UnusedAttribute"
+        android:enableOnBackInvokedCallback="false" android:supportsRtl="true">
+        <!-- HTTP is accepted only for an explicitly selected private IPv4 controller.
+             Public controllers require HTTPS; certificate errors are never ignored. -->
+        <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -2,11 +2,13 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-only or limited-control credentials issued from Settings → Mobile access. An Android test APK is available; the native HarmonyOS 6 project is included as source and has not been compiled. Neither platform has completed device validation. See the [mobile build and acceptance guide](mobile/README.md).
+
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Current version: 0.4.4.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-Includes experiment matrices, automatic/assisted/manual allocation, form-based import with optional AI assistance, managed project cleanup, and Markdown result reports. Open GPU settings in Experiment Worker to verify and enable a previously disabled card. Edit node concurrency and budgets from the compute page, and override resources for individual experiments or matrices. See the [release notes](docs/RELEASE-0.4.4.md). Updates start when you request them.
+**Current version: 0.4.5.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+Adds mobile monitoring and limited remote controls with separate, revocable device credentials. Update the controller before connecting the mobile client. Includes experiment matrices, resource budgets, optional AI-assisted import, result reports, and local GPU settings. See the [release notes](docs/RELEASE-0.4.5.md). Updates start when you request them.
 
 ## Download and install
 

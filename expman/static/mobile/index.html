@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#234f41"><meta name="referrer" content="no-referrer"><title>实验台 · 移动监控</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/mobile/mobile.css"></head>
+<body>
+<header class="top"><div><span class="eyebrow">EXPERIMENT MONITOR</span><h1>实验台<span>移动监控</span></h1></div><span id="connection" class="badge">未连接</span></header>
+<main>
+  <p id="freshness" class="freshness">连接管理端，查看实验进展。</p><p id="notice" class="notice" role="status" hidden></p>
+  <section id="login" class="card"><h2>连接你的实验台</h2><p class="muted">在电脑管理端的「设置 → 移动端访问」创建凭证，再填入下方。</p><form id="login-form"><label>移动访问凭证<input id="credential" type="password" required maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="check"><input id="remember" type="checkbox">在此设备记住凭证</label><p class="muted small">只在你自己的手机上启用。也可在管理端随时撤销此设备。</p><button id="login-button" class="primary">连接管理端</button></form><p class="muted small" id="login-origin"></p></section>
+  <div id="workspace" hidden>
+    <section data-view="overview"><div class="heading"><h2>实验概况</h2><button id="refresh" class="quiet">刷新</button></div><div id="stats" class="stats"></div><div class="heading"><h2>正在关注</h2><span class="muted small">最近 6 个活跃实验</span></div><div id="recent" class="stack"></div></section>
+    <section data-view="experiments" hidden><div class="heading"><h2>全部实验</h2><span id="job-count" class="muted"></span></div><label class="search">搜索实验<input id="search" type="search" placeholder="名称、算法或分组"></label><label>筛选状态<select id="filter"><option value="all">全部状态</option><option value="active">进行中</option><option value="succeeded">已完成</option><option value="attention">失败 / 中断 / 暂停</option></select></label><div id="jobs" class="stack"></div></section>
+    <section data-view="nodes" hidden><h2>算力节点</h2><p class="muted small">暂停接单影响后续任务，正在运行的实验会继续。</p><div id="nodes" class="stack"></div></section>
+    <section data-view="account" hidden><div class="card"><h2>连接信息</h2><dl id="account"></dl><p class="muted">手机只展示状态和提交操作，管理端后台服务需保持运行。断线时禁止操作，重新连接后刷新状态。</p><button id="logout" class="danger">退出并清除此设备的凭证</button></div></section>
+  </div>
+  <section id="detail" hidden><button id="back" class="quiet">← 返回实验列表</button><div class="card"><div class="heading"><h2 id="detail-title"></h2><span id="detail-status" class="badge"></span></div><p id="detail-node" class="muted"></p><p id="detail-timer" class="timer"></p><p id="detail-pending" class="notice" hidden></p><div id="detail-actions" class="actions"></div><p id="detail-message" class="muted small"></p></div><div class="card"><h2>指标</h2><div id="metrics" class="metrics"></div><label>历史曲线<select id="metric-key"></select></label><svg id="chart" viewBox="0 0 320 145" role="img" aria-label="最近回传的指标曲线"></svg><p id="chart-note" class="muted small"></p></div><div class="card"><h2>最新日志</h2><p class="muted small">展示算力端最近回传的日志片段。</p><pre id="log"></pre></div><div class="card"><h2>实验参数</h2><pre id="params"></pre></div><div class="card"><h2>结果文件</h2><div id="artifacts"></div><p class="muted small">完整文件请在电脑管理端下载。</p></div></section>
+</main>
+<nav id="tabs" class="tabs" aria-label="移动导航" hidden><button data-tab="overview" aria-current="page">总览</button><button data-tab="experiments">实验</button><button data-tab="nodes">算力</button><button data-tab="account">连接</button></nav>
+<div id="confirm" class="modal" hidden><section role="dialog" aria-modal="true" aria-labelledby="confirm-title" class="card"><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><p class="muted small">请求由管理端处理，算力端收到并执行后才会更新状态。</p><div class="actions"><button id="confirm-no" class="quiet">返回</button><button id="confirm-yes" class="primary">确认提交</button></div></section></div>
+<script src="/timing.js" defer></script><script src="/mobile/model.js" defer></script><script src="/mobile/mobile.js" defer></script>
+</body></html>

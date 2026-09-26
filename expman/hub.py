@@ -28,6 +28,7 @@ from . import __version__
 from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256_file, validate_task
 from .scheduler import choose_assignment
 from .matrix import MatrixHubMixin, initialize as initialize_matrices
+from .mobile import MobileHubMixin, initialize as initialize_mobile
 from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_policies,
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 
@@ -189,7 +190,7 @@ def inspect_update_state(db):
                 "管理端当前无未完成实验或已登记的文件传输，可以安装更新；离线节点恢复后继续同步", **counts)
 
 
-class Hub(MatrixHubMixin, NodePolicyHubMixin):
+class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -265,6 +266,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin):
         self._cleanup_project_archives()
         initialize_matrices(self.db)
         initialize_node_policies(self.db)
+        initialize_mobile(self.db)
 
     @contextmanager
     def transaction(self):
@@ -445,6 +447,12 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin):
         if mode not in ("run", "drain") or not isinstance(node_id, str):
             raise APIError(400, "node_id and mode run/drain are required")
         with self.transaction():
+            if "expected_mode" in payload:
+                node = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()
+                if node is None:
+                    raise APIError(404, "Unknown node")
+                if node["mode"] != payload["expected_mode"]:
+                    raise APIError(409, "节点策略已变化，请刷新后确认")
             if self.db.execute("UPDATE nodes SET mode=? WHERE id=?", (mode, node_id)).rowcount != 1:
                 raise APIError(404, "Unknown node")
             self._assign()
@@ -457,6 +465,8 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin):
             raise APIError(400, "action must be stop, resume or cancel")
         with self.transaction():
             row = self._find_job(payload.get("job_id"))
+            if "expected_command_id" in payload and row["command_id"] != payload["expected_command_id"]:
+                raise APIError(409, "此实验已收到其他操作，请刷新后确认结果")
             if action == "resume" and self._project_is_deleted(json.loads(row["spec"])):
                 raise APIError(409, "This project was deleted; import and deploy it again before submitting a new experiment")
             if action == "resume" and json.loads(row["spec"]).get("resume_supported") is False:
@@ -949,6 +959,10 @@ def make_server(hub, host="127.0.0.1", port=8765):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if self.path.split("?", 1)[0].startswith(("/mobile/", "/mobile-access")) or self.path == "/mobile":
+                self.send_header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; "
+                                 "script-src 'self'; style-src 'self'; img-src 'self'; "
+                                 "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
             if disposition:
                 self.send_header("Content-Disposition", disposition)
             self.end_headers()
@@ -978,6 +992,16 @@ def make_server(hub, host="127.0.0.1", port=8765):
         def _route(self):
             url = urlsplit(self.path)
             path = url.path
+            mobile_files = {"/mobile": "mobile/index.html", "/mobile/": "mobile/index.html",
+                            "/mobile/mobile.js": "mobile/mobile.js", "/mobile/model.js": "mobile/model.js",
+                            "/mobile/mobile.css": "mobile/mobile.css", "/mobile-access": "mobile/access.html",
+                            "/mobile/access.js": "mobile/access.js"}
+            if self.command == "GET" and path in mobile_files:
+                static = Path(__file__).parent / "static" / mobile_files[path]
+                content_type = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                                ".css": "text/css; charset=utf-8"}[static.suffix]
+                self._bytes(static.read_bytes(), content_type)
+                return
             if self.command == "GET" and path in ("/", "/app.js", "/timing.js", "/style.css", "/favicon.ico"):
                 filename = {"/": "index.html", "/app.js": "app.js", "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
@@ -988,6 +1012,16 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 return
             if not path.startswith("/api/"):
                 raise APIError(404, "Not found")
+            if path.startswith("/api/mobile/") and path not in ("/api/mobile/devices", "/api/mobile/revoke"):
+                query = parse_qs(url.query)
+                identities = query.get("id", [])
+                if path == "/api/mobile/job" and len(identities) != 1:
+                    raise APIError(400, "Exactly one id query parameter is required")
+                payload = self._body() if self.command == "POST" else None
+                with hub.update_request():
+                    self._send(hub.mobile_request(self.headers.get("Authorization"), self.command, path,
+                                                 payload, identities[0] if identities else None))
+                return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
             required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download") else "admin"
             if role != required_role:
@@ -1003,7 +1037,9 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     raise APIError(400, f"Exactly one {name} query parameter is required")
                 return values[0]
             if self.command == "GET":
-                if path == "/api/local/imports":
+                if path == "/api/mobile/devices":
+                    self._send(hub.mobile_devices())
+                elif path == "/api/local/imports":
                     self._send(hub.project_imports().listing())
                 elif path == "/api/local/imports/item":
                     self._send(hub.project_imports().item(parameter("id")))
@@ -1053,6 +1089,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          "/api/mobile/devices": hub.mobile_enroll, "/api/mobile/revoke": hub.mobile_revoke,
                           "/api/node-policy": hub.set_node_policy,
                           "/api/scheduling/preview": hub.scheduling_preview,
                           "/api/matrices/save": hub.matrix_save, "/api/matrices/preview": hub.matrix_preview,

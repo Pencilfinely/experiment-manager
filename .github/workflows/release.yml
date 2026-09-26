@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.4.4
+        default: v0.4.5
 permissions:
   contents: write
 env:
@@ -29,6 +29,9 @@ jobs:
       - run: node tests/test_timing_ui.js
       - run: node tests/test_matrix_ui.js
       - run: node tests/test_resource_ui.js
+      - run: node --check expman/static/mobile/mobile.js
+      - run: node --check expman/static/mobile/access.js
+      - run: node tests/test_mobile_ui.js
       - name: Validate native desktop and updater
         shell: pwsh
         run: |

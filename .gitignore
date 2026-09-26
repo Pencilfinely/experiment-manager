@@ -19,3 +19,19 @@ docs/多机GPU实验体系说明书.md
 docs/验证报告.md
 docs/真实实验与部署升级.md
 docs/SASRec接入说明.md
+
+# Native mobile toolchains, generated packages and signing material.
+mobile/**/build/
+mobile/**/.gradle/
+mobile/**/.hvigor/
+mobile/**/.idea/
+mobile/**/oh_modules/
+mobile/**/local.properties
+mobile/**/local-profile.json5
+mobile/**/*.jks
+mobile/**/*.p12
+mobile/**/*.p7b
+mobile/**/*.cer
+mobile/**/*.hap
+mobile/**/*.app
+mobile/**/*.apk

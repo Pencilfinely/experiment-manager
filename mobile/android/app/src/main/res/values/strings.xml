@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">实验台监控</string>
+    <string name="connection_title">实验台 · 移动监控</string>
+    <string name="connection_hint">填写手机能够访问的管理端地址。连接后，输入管理端签发的移动凭证。</string>
+    <string name="address_hint">https://你的管理端地址</string>
+    <string name="allow_private_http">允许连接可信私网中的 HTTP 地址</string>
+    <string name="connect">连接管理端</string>
+    <string name="invalid_address">请输入完整管理端地址，不包含路径、凭证或查询参数。</string>
+    <string name="http_not_allowed">HTTP 仅允许已勾选的可信私网 IPv4 地址；其他地址请使用 HTTPS。</string>
+    <string name="switch_controller">更换管理端</string>
+    <string name="reload">重新加载</string>
+    <string name="certificate_error">证书验证失败，请在管理端配置有效 HTTPS 证书。</string>
+    <string name="connection_error">无法连接，请检查管理端服务和网络，再点击重新加载。</string>
+    <string name="http_error">管理端返回 %1$d，请确认已升级到支持移动监控的版本。</string>
+</resources>

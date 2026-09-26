@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.md)
 
-This guide covers the **0.4.4 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis.
+This guide covers the **0.4.5 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis. For mobile access, update the controller and follow the [mobile guide](../mobile/README.md).
 
 ## Enable a previously disabled GPU
 
