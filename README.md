@@ -12,16 +12,20 @@
 
 这里的旧文件名仅供旧更新器识别，安装包内容与 ExLab 发布逐字节一致。源码开发请将 Git remote 更新为 `https://github.com/Pencilfinely/exlab.git`；本仓库只维护兼容升级资产。
 
+0.5.3 修复已不存在的旧容器阻塞 Worker 退出的问题，并新增“释放 WSL 内存”。可保留 Center 开启，按需停止本机算力并关闭 Ubuntu；其中的其他会话需确认关闭。手机 Monitor APK 仍为 0.5.2。
+
 ## English
+
+Version 0.5.3 fixes shutdown blocked by missing historical containers and adds on-demand WSL memory release in Worker while Center stays open. Other Ubuntu sessions require confirmation before closure. Monitor APK remains at 0.5.2.
 
 The application and its source code have moved to **[Pencilfinely/exlab](https://github.com/Pencilfinely/exlab)**.
 
 This repository preserves the exact update address used by Experiment Manager 0.4.5 and earlier desktop clients. Their updater rejects repository redirects, so this address provides real migration releases.
 
-Open the existing application's update window, check for updates, then download and install **ExLab 0.5.2**. Update Center and Worker separately. The installer keeps the existing data directory, WSL selection and node identity. Once upgraded, future updates use the ExLab repository.
+Open the existing application's update window, check for updates, then download and install **ExLab 0.5.3**. Update Center and Worker separately. The installer keeps the existing data directory, WSL selection and node identity. Once upgraded, future updates use the ExLab repository.
 
 Version 0.5.2 renames desktop shortcuts and application descriptions to **ExLab Center / ExLab Worker**. It adds persistent mobile pairing, automatic reconnect, a redesigned mobile entry and pairing page, and native APK update checks with download integrity and signing identity verification. Get the **ExLab Monitor 0.5.2 Android APK** from the [main release](https://github.com/Pencilfinely/exlab/releases/tag/v0.5.2); install over the previous APK to keep app data.
 
 If an old Center reports unfinished remote experiments and blocks installation, stop the Center normally, exit the client, then run the installer. Remote training continues. ExLab 0.5.1 and newer correct this check so remote experiment records and resumable transfers no longer block Center updates.
 
-The `ExperimentManager-0.5.2-…-Setup.exe` assets contain the same bytes as the corresponding ExLab installers. SHA-256 checksums are included. New installations should use the [ExLab releases](https://github.com/Pencilfinely/exlab/releases).
+The `ExperimentManager-0.5.3-…-Setup.exe` assets contain the same bytes as the corresponding ExLab installers. SHA-256 checksums are included. New installations should use the [ExLab releases](https://github.com/Pencilfinely/exlab/releases).
