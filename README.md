@@ -4,7 +4,7 @@
 
 本仓库保留旧客户端的升级入口。项目源码、后续开发和正式发布已迁移到 **[ExLab](https://github.com/Pencilfinely/exlab)**。
 
-旧软件中选择“检查更新 → 下载更新 → 安装更新”即可升级到 ExLab 0.5.4。主控和算力端分别更新，沿用原数据、节点身份和配置；安装后自动使用新仓库检查后续版本。
+旧软件中选择“检查更新 → 下载更新 → 安装更新”即可升级到 ExLab 0.5.6。主控和算力端分别更新，沿用原数据、节点身份和配置；安装后自动使用新仓库检查后续版本。
 
 桌面快捷方式和程序描述统一为 **ExLab Center / ExLab Worker**。新版还包括移动端入口与配对页面优化、默认长期配对、自动接入与断线重连，以及手机 APK 的检查、下载、校验和安装更新。手机旧 APK 需先覆盖安装一次 [ExLab Monitor 0.5.2](https://github.com/Pencilfinely/exlab/releases/tag/v0.5.2)，之后可在应用内更新；不要先卸载，以保留应用数据。
 
@@ -12,11 +12,15 @@
 
 这里的旧文件名仅供旧更新器识别，安装包内容与 ExLab 发布逐字节一致。源码开发请将 Git remote 更新为 `https://github.com/Pencilfinely/exlab.git`；本仓库只维护兼容升级资产。
 
+0.5.6 将 Worker 的停用和 WSL 内存释放统一为“停用并释放资源”，支持已停用后重试，并明确显示资源释放结果；其他 Ubuntu 会话需确认关闭，Center 保持运行。退出时自动释放的选项单独保留。
+
 0.5.3 修复已不存在的旧容器阻塞 Worker 退出的问题，并新增“释放 WSL 内存”。可保留 Center 开启，按需停止本机算力并关闭 Ubuntu；其中的其他会话需确认关闭。手机 Monitor APK 仍为 0.5.2。
 
 0.5.4 修复命令行主控绕过客户端停用与更新流程的问题，并核对当前后台身份。若已经运行的是升级前的旧命令行主控，请在原终端按 Ctrl+C 正常退出，然后重试安装。升级后的命令行与桌面入口统一支持停用和应用内更新，保留原实验与连接。
 
 ## English
+
+Version 0.5.6 combines Worker deactivation and WSL memory release into one action, supports retrying release after deactivation, and reports whether resources were actually released. Other Ubuntu sessions require confirmation before closing; Center stays running. Automatic release on client exit remains a separate preference.
 
 Version 0.5.4 unifies command-line and desktop Center lifecycle management and rejects stale ownership records. An already-running legacy CLI must exit normally with Ctrl+C before installation. New command-line Centers support desktop deactivation and in-app updates while preserving experiments and connections.
 
@@ -26,10 +30,10 @@ The application and its source code have moved to **[Pencilfinely/exlab](https:/
 
 This repository preserves the exact update address used by Experiment Manager 0.4.5 and earlier desktop clients. Their updater rejects repository redirects, so this address provides real migration releases.
 
-Open the existing application's update window, check for updates, then download and install **ExLab 0.5.4**. Update Center and Worker separately. The installer keeps the existing data directory, WSL selection and node identity. Once upgraded, future updates use the ExLab repository.
+Open the existing application's update window, check for updates, then download and install **ExLab 0.5.6**. Update Center and Worker separately. The installer keeps the existing data directory, WSL selection and node identity. Once upgraded, future updates use the ExLab repository.
 
 Version 0.5.2 renames desktop shortcuts and application descriptions to **ExLab Center / ExLab Worker**. It adds persistent mobile pairing, automatic reconnect, a redesigned mobile entry and pairing page, and native APK update checks with download integrity and signing identity verification. Get the **ExLab Monitor 0.5.2 Android APK** from the [main release](https://github.com/Pencilfinely/exlab/releases/tag/v0.5.2); install over the previous APK to keep app data.
 
 If an old Center reports unfinished remote experiments and blocks installation, stop the Center normally, exit the client, then run the installer. Remote training continues. ExLab 0.5.1 and newer correct this check so remote experiment records and resumable transfers no longer block Center updates.
 
-The `ExperimentManager-0.5.4-…-Setup.exe` assets contain the same bytes as the corresponding ExLab installers. SHA-256 checksums are included. New installations should use the [ExLab releases](https://github.com/Pencilfinely/exlab/releases).
+The `ExperimentManager-0.5.6-…-Setup.exe` assets contain the same bytes as the corresponding ExLab installers. SHA-256 checksums are included. New installations should use the [ExLab releases](https://github.com/Pencilfinely/exlab/releases).
